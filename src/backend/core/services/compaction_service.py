@@ -872,11 +872,8 @@ async def run_post_turn_compaction(
 
 
 def estimate_history_tokens(history: List[Dict[str, Any]]) -> int:
-    """Estimate history tokens from rendered text without DB or LLM calls."""
-    return sum(
-        C.approx_token_count(_render_content_for_summary(m.get("content")))
-        for m in history
-    )
+    """Estimate history text and image reserves without DB or LLM calls."""
+    return sum(C.estimate_content_tokens(m.get("content")) for m in history)
 
 
 def estimate_context_budget(

@@ -17,6 +17,7 @@ from core.llm.execution_manifest import canonical_json, stable_hash
 CONTEXT_SCHEMA_VERSION = "harness.context.v2"
 SESSION_CONTEXT_META_KEY = "_context_item"
 CONTEXT_SEQUENCE_STRIDE = 1_000
+IMAGE_TOKEN_RESERVE = 1_024
 
 KIND_SYSTEM_RULE = "system_rule"
 KIND_USER_INPUT = "user_input"
@@ -96,6 +97,40 @@ def _normalize_context_content(content: Any) -> Any:
     return content
 
 
+def _tool_result_images(content: Any) -> list[Any]:
+    """Image payloads are atomic media, not part of a tool's text allowance."""
+    if not isinstance(content, Mapping) or content.get("type") != "tool_result":
+        return []
+    output = content.get("output")
+    if not isinstance(output, (list, tuple)):
+        return []
+    return [
+        block
+        for block in output
+        if isinstance(block, Mapping)
+        and block.get("type") == "data"
+        and isinstance(block.get("source"), Mapping)
+        and str(block["source"].get("media_type") or "").startswith("image/")
+    ]
+
+
+def image_token_reserve(content: Any) -> int:
+    """Reserve media occupancy without measuring image transport bytes."""
+    if isinstance(content, (list, tuple)):
+        return sum(image_token_reserve(block) for block in content)
+    if isinstance(content, Mapping):
+        source = content.get("source")
+        if (
+            content.get("type") == "data"
+            and isinstance(source, Mapping)
+            and str(source.get("media_type") or "").startswith("image/")
+        ):
+            return IMAGE_TOKEN_RESERVE
+        if content.get("type") == "tool_result":
+            return image_token_reserve(content.get("output", content.get("content")))
+    return 0
+
+
 def estimate_context_tokens(content: Any) -> int:
     """Deterministic conservative estimate without provider-specific imports."""
     content = _normalize_context_content(content)
@@ -107,7 +142,13 @@ def estimate_context_tokens(content: Any) -> int:
         # Provider image accounting is not proportional to base64 bytes. Keep a
         # conservative fixed reserve without letting transport encoding evict
         # the actual attachment before the provider can count it precisely.
-        return 1_024
+        return IMAGE_TOKEN_RESERVE
+    if _tool_result_images(content):
+        # Count image reserves recursively instead of tokenizing their base64
+        # inside the enclosing tool-result JSON.
+        return estimate_context_tokens({**content, "output": []}) + sum(
+            estimate_context_tokens(block) for block in content["output"]
+        )
     if isinstance(content, list):
         return sum(estimate_context_tokens(item) for item in content)
     return max(1, (len(canonical_json(content).encode("utf-8")) + 3) // 4)
@@ -187,6 +228,24 @@ def _truncate_content(content: Any, max_tokens: int, policy: str) -> Any:
                 )
                 return mutable
             if key == "output" and isinstance(value, (list, Mapping)):
+                images = _tool_result_images(mutable)
+                if images:
+                    text = "\n".join(
+                        (
+                            str(block["text"])
+                            if isinstance(block, Mapping) and block.get("text") is not None
+                            else block if isinstance(block, str) else canonical_json(block)
+                        )
+                        for block in value
+                        if block not in images
+                    )
+                    output = [{"type": "text", "text": ""}, *images]
+                    overhead = estimate_context_tokens({**mutable, key: output})
+                    output[0]["text"] = _truncate_text(
+                        text, max(1, max_tokens - overhead), tail_only=policy == POLICY_TAIL
+                    )
+                    mutable[key] = output
+                    return mutable
                 if isinstance(value, list):
                     parts = []
                     for block in value:
@@ -215,6 +274,13 @@ def _prune_tool_output(content: Any, original_tokens: int) -> Any:
     mutable = thaw_json(content)
     if not isinstance(mutable, dict) or str(mutable.get("type") or "") != "tool_result":
         raise ValueError("only tool_result content can be pruned")
+    images = _tool_result_images(mutable)
+    if images:
+        mutable["output"] = [
+            {"type": "text", "text": _PRUNED_OUTPUT_TEMPLATE.format(tokens=original_tokens)},
+            *images,
+        ]
+        return mutable
     for key in ("output", "content", "text"):
         if key in mutable:
             mutable[key] = _PRUNED_OUTPUT_TEMPLATE.format(tokens=original_tokens)
@@ -492,10 +558,15 @@ class ContextAssembler:
         records: dict[str, dict[str, Any]],
     ) -> Optional[ContextItem]:
         original = item.token_estimate
+        # Media still contributes to whole-context occupancy, but cannot spend
+        # or be cut by the per-item text allowance.
+        budget = item.token_budget + sum(
+            estimate_context_tokens(block) for block in _tool_result_images(item.content)
+        )
         if (
             item.visibility == VISIBILITY_MANIFEST_ONLY
             or item.truncation_policy == POLICY_NEVER
-            or original <= item.token_budget
+            or original <= budget
         ):
             records[item.item_id] = {
                 "action": "included",
@@ -504,10 +575,19 @@ class ContextAssembler:
             }
             return item
         if item.truncation_policy in {POLICY_HEAD_TAIL, POLICY_TAIL} and item.token_budget > 0:
+            target = budget
             capped = item.with_content(
-                _truncate_content(item.content, item.token_budget, item.truncation_policy)
+                _truncate_content(item.content, target, item.truncation_policy)
             )
-            if capped.token_estimate <= item.token_budget:
+            # JSON escaping of newlines/quotes can exceed the initial text
+            # allowance. Refit using the measured cost, never discard an image
+            # result just because its accompanying text needs a smaller slice.
+            while capped.token_estimate > budget and target > 1:
+                target = max(1, target - (capped.token_estimate - budget))
+                capped = item.with_content(
+                    _truncate_content(item.content, target, item.truncation_policy)
+                )
+            if capped.token_estimate <= budget:
                 records[item.item_id] = {
                     "action": "truncated",
                     "original_tokens": original,
