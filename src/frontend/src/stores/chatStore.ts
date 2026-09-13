@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { isLocalProject, setChatRoutingContext } from '../api';
+import { isHybridDual, isLocalProject, isRegisteredLocalChat, setChatRoutingContext } from '../api';
 import type {
   ChatItem,
   ChatMessage,
@@ -9,9 +9,10 @@ import type {
   PlanProgressState,
   ReferencableChat,
 } from '../types';
-import { loadChatStore, saveChatStoreDebounced, flushChatStore, nowId, newDraftChatId, isDraftChatId, userScopedKey, purgeLegacyUnscopedKeys, mergeChatStores, registerDeletedChatId, setStreamingIdsProvider, subscribeChatStoreChanges, STORAGE_KEY, writeLocal, removeLocal } from '../storage';
+import { loadChatStore, saveChatStoreDebounced, flushChatStore, nowId, newDraftChatId, isDraftChatId, isNewDraftChatId, userScopedKey, purgeLegacyUnscopedKeys, mergeChatStores, registerDeletedChatId, setStreamingIdsProvider, subscribeChatStoreChanges, STORAGE_KEY, writeLocal, removeLocal } from '../storage';
 import { usePageConfigStore } from './pageConfigStore';
 import { usePluginStore } from './pluginStore';
+import { loadActiveProjectId } from './projectSession';
 import { t } from '../i18n';
 import { resolveModeSlug, resolvePlanModeActive } from '../utils/chatMode';
 import type { ChatCommand } from '../utils/projectCommands';
@@ -451,6 +452,16 @@ interface ChatState {
 let unsubscribeExternalChanges: (() => void) | null = null;
 
 export const useChatStore = create<ChatState>((set, get) => {
+  // Only frontend-created, unsent drafts get a default. Never move restored history.
+  const initializeDraftRunTarget = (chatId: string, newlyCreated = false) => {
+    const state = get();
+    const chat = state.store.chats[chatId];
+    if (!isHybridDual() || !isNewDraftChatId(chatId) || !isLocalDraftChat(chatId) || isRegisteredLocalChat(chatId)
+        || chat?.projectId || chat?.runTarget
+        || (!newlyCreated && state.store.order.includes(chatId))) return;
+    if (loadActiveProjectId()) return;
+    state.setChatRunTarget(chatId, 'local');
+  };
   // 合并写盘时：本标签页正在流式输出的会话一律以本内存版本为准
   setStreamingIdsProvider(() => get().sendingChatIds);
   return ({
@@ -506,13 +517,16 @@ export const useChatStore = create<ChatState>((set, get) => {
   setStore: (store) => {
     set({ store, storeRef: store });
     saveChatStoreDebounced(get().currentUserId, store);
+    initializeDraftRunTarget(get().currentChatId);
   },
   updateStore: (updater) => {
     const next = updater(get().store);
     set({ store: next, storeRef: next });
     saveChatStoreDebounced(get().currentUserId, next);
+    initializeDraftRunTarget(get().currentChatId);
   },
   setCurrentChatId: (id) => {
+    initializeDraftRunTarget(id);
     saveCurrentChatId(get().currentUserId, id);
     const chat = get().store.chats[id];
     // activePlugin is global state but semantically belongs to the "current chat". On chat switch,
@@ -868,7 +882,7 @@ export const useChatStore = create<ChatState>((set, get) => {
         };
     // An explicit project choice also determines the draft's execution target.
     if (isLocalProject(projectId)) nextChat.runTarget = 'local';
-    else delete nextChat.runTarget;
+    else nextChat.runTarget = 'cloud';
     const next: ChatStoreData = {
       chats: { ...store.chats, [chatId]: nextChat },
       // Don't add to order proactively: a newly created empty chat doesn't enter the sidebar
@@ -896,7 +910,7 @@ export const useChatStore = create<ChatState>((set, get) => {
     };
     const nextChat: ChatItem = { ...base, updatedAt: now };
     if (target === 'local') nextChat.runTarget = 'local';
-    else delete nextChat.runTarget;
+    else nextChat.runTarget = 'cloud';
     const next: ChatStoreData = {
       chats: { ...store.chats, [chatId]: nextChat },
       order: store.order,
@@ -983,6 +997,7 @@ export const useChatStore = create<ChatState>((set, get) => {
       quotedFollowUp: nextChat.pendingQuote || null,
       sending: sendingChatIds.has(targetId),
     });
+    initializeDraftRunTarget(targetId, !reuse);
   },
 
   exitChatMode: (mode) => {
@@ -1077,6 +1092,7 @@ export const useChatStore = create<ChatState>((set, get) => {
       loopMode: false,
       sending: sendingChatIds.has(targetId),
     });
+    initializeDraftRunTarget(targetId, !reuse);
     return !!sitesPlugin;
   },
 
@@ -1103,6 +1119,7 @@ export const useChatStore = create<ChatState>((set, get) => {
       ...applyDefaultChatMode(),
       modeSlug: 'standard',
     });
+    initializeDraftRunTarget(id);
   },
 
   deleteChat: (id) => {
@@ -1154,6 +1171,7 @@ export const useChatStore = create<ChatState>((set, get) => {
         activeMention: null,
       });
     }
+    initializeDraftRunTarget(get().currentChatId);
   },
 
   updateMessages: (chatId, messages) => {
@@ -1221,6 +1239,7 @@ export const useChatStore = create<ChatState>((set, get) => {
       modeSlug: resolveModeSlug(store.chats[currentChatId]),
       ...restoredEffort(store.chats[currentChatId]),
     });
+    initializeDraftRunTarget(currentChatId);
     // 多开窗口：另一个窗口改了这个账号的聊天树时，把外部改动即时合回内存，
     // 免得两个窗口各说各话（新建的会话看不见、已解绑的项目又被贴回来），
     // 非要刷新才对得上。只读不写，避免两个窗口互相唤醒写盘。

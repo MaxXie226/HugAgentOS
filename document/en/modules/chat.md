@@ -266,6 +266,10 @@ Plan Mode splits complex tasks into "generate plan → user reviews/edits → ex
 
 ## Sub-agents
 
+Native image tools return images as separate media blocks. Main agents and sub-agents share text-only tool-result truncation: image base64 does not consume the text allowance or enter text offload files. Text pruning in the canonical context also preserves image blocks. Image read-size limits and overall context capacity protection remain in effect.
+
+Sub-agent call rows in the main conversation show identity, status, and the details link without a running timer or completed duration. Timing remains available in the execution details panel. Rows use the same arrow styling as ordinary tools: the arrow sits next to the name and appears only on hover or keyboard focus.
+
 The regular main-chat harness always provides three platform defaults. They
 are not `UserAgent` rows, use reserved IDs, and cannot be shadowed by a
 user-created agent:

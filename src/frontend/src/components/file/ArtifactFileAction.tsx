@@ -1,0 +1,43 @@
+import { useState } from 'react';
+import { Dropdown, message } from 'antd';
+import { DownOutlined, DownloadOutlined, ExportOutlined, FolderOpenOutlined, LoadingOutlined } from '@ant-design/icons';
+import { artifactOrigin, artifactUrl, openLocalArtifact, type ArtifactLocation } from '../../utils/artifactAccess';
+import { t } from '../../i18n';
+
+/** Same file action in output cards and preview panes. Native paths never come from model output. */
+export function ArtifactFileAction({ file, className, onDownload, disabled = false }: {
+  file: ArtifactLocation & { name?: string };
+  className?: string;
+  onDownload?: () => void;
+  disabled?: boolean;
+}) {
+  const [busy, setBusy] = useState(false);
+  const local = artifactOrigin(file) === 'local';
+  const open = async (folder = false) => {
+    if (busy || disabled) return;
+    setBusy(true);
+    try { await openLocalArtifact(file, folder); }
+    catch (error) { message.error(error instanceof Error ? error.message : t('无法打开文件')); }
+    finally { setBusy(false); }
+  };
+  if (!local) {
+    return <a className={className} aria-label={t('下载 {name}', { name: file.name || t('文件') })} href={artifactUrl(file)} download={file.name}
+      onClick={(event) => {
+        event.stopPropagation();
+        if (onDownload) { event.preventDefault(); onDownload(); }
+      }}><DownloadOutlined /> {t('下载')}</a>;
+  }
+  return <span className={`jx-artifactOpen ${className || ''}`} onClick={(event) => event.stopPropagation()}>
+    <button type="button" className="jx-artifactOpen-main" disabled={busy || disabled}
+      onClick={() => void open()} aria-label={t('打开文件')} title={disabled ? t('请先保存文件') : t('打开文件')}>
+      {busy ? <LoadingOutlined spin /> : <ExportOutlined />} {t('打开')}
+    </button>
+    <Dropdown trigger={['click']} menu={{ items: [{
+      key: 'folder', label: t('打开所在文件夹'), icon: <FolderOpenOutlined />,
+      onClick: () => void open(true),
+    }] }} disabled={busy || disabled}>
+      <button type="button" className="jx-artifactOpen-menu" disabled={busy || disabled}
+        aria-label={t('打开选项')} title={t('打开所在文件夹')}><DownOutlined /></button>
+    </Dropdown>
+  </span>;
+}

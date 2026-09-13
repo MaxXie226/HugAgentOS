@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence
 
 from agentscope.agent import Agent, ContextConfig
+from agentscope.message import DataBlock, ToolResultBlock
 from agentscope.model import ChatUsage
 from core.llm.execution_manifest import stable_hash
 from core.llm.manifest_agent import ManifestBoundAgent
@@ -75,6 +76,38 @@ class CompactingAgent(ManifestBoundAgent):
         self._jx_trigger_ratio: Optional[float] = None
         # Prevent repeated compaction when an oversized context cannot shrink.
         self._jx_compacted_cursor: Optional[tuple[_MessageCursor, ...]] = None
+
+    async def _split_tool_result_for_compression(
+        self, tool_result: ToolResultBlock
+    ) -> tuple[ToolResultBlock, ToolResultBlock | None]:
+        """Apply the tool text limit without offloading image payloads.
+
+        AgentScope counts base64 transport bytes as text tokens and offloads an
+        indivisible image wholesale. Keep images outside this text-only budget;
+        image loading limits and whole-context admission remain independent.
+        """
+        output = tool_result.output
+        if not isinstance(output, list):
+            return await super()._split_tool_result_for_compression(tool_result)
+        images = []
+        non_images = []
+        for block in output:
+            if isinstance(block, DataBlock) and block.source.media_type.startswith("image/"):
+                images.append(block)
+            else:
+                non_images.append(block)
+        if not images:
+            return await super()._split_tool_result_for_compression(tool_result)
+        if not non_images:
+            return tool_result, None
+        kept, overflow = await super()._split_tool_result_for_compression(
+            tool_result.model_copy(update={"output": non_images})
+        )
+        if overflow is None:
+            return tool_result, None
+        # The provider formatter emits text first and promotes media to image
+        # messages. Retain every image in its original relative order.
+        return kept.model_copy(update={"output": [*kept.output, *images]}), overflow
 
     # ── Token metering ───────────────────────────────────────────────────────
 

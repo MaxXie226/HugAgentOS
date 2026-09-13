@@ -1,8 +1,9 @@
 import { create } from 'zustand';
+import { artifactOrigin, type ArtifactLocation } from '../utils/artifactAccess';
 
 
 
-export interface CanvasArtifact {
+export interface CanvasArtifact extends ArtifactLocation {
   file_id: string;
   name: string;
   url: string;          // relative path, e.g. /files/xxx
@@ -78,7 +79,7 @@ export interface CanvasPluginTab {
 
 export type CanvasTab = CanvasFileTab | CanvasOntologyTab | CanvasPluginTab | CanvasSubagentTab;
 
-const fileTabId = (fileId: string) => `file:${fileId}`;
+const fileTabId = (file: CanvasArtifact) => `file:${file.origin || 'cloud'}:${file.file_id}`;
 const ontologyTabId = (chatId: string) => `ontology:${chatId}`;
 const pluginTabId = (target: PluginPanelTarget) =>
   `plugin:${target.slug}:${target.canvasId}:${target.chatId || 'global'}:${target.toolId || 'latest'}`;
@@ -151,7 +152,8 @@ export const useCanvasStore = create<CanvasState>((set) => ({
   panelWidth: null,
   ...derive([], null),
   openCanvas: (artifact) => set((state) => {
-    const id = fileTabId(artifact.file_id);
+    artifact = { ...artifact, origin: artifactOrigin(artifact) };
+    const id = fileTabId(artifact);
     const index = state.tabs.findIndex((tab) => tab.id === id);
     const previous = index >= 0 ? state.tabs[index] : null;
     // 同一文件重开 = 复用原页签并 +1 openSeq（刷新预览），而不是叠一个重复页签。

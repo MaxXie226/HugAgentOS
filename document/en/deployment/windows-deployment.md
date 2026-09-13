@@ -284,3 +284,14 @@ On macOS, the main interface extends to the top of the window without a separate
 
 
 During capability synchronization, local change capture snapshots account identity when a database transaction starts, before executing SQL, so it never waits for the account lock while holding a database write lock. Repeated desktop bridge authentication leaves unchanged user profiles untouched and runs in a worker thread to keep database waits off the service event loop. After upgrading, retry previously failed synchronization without deleting the local database. The macOS capability synchronization page uses the same layout background for its top inset in both light and dark themes.
+
+
+## File previews and opening local files
+
+Desktop output cards show **Open** for files stored on the computer and open the saved original in the system default application. The adjacent dropdown offers **Open containing folder**. Cloud files keep **Download**. Dual mode chooses the action from the file's ownership; switching conversations does not change an open file's source. The browser application keeps downloading files.
+
+Local image, PDF, Office and text previews route to the local service. Office files in local folder projects also support PDF previews. Path lookup uses the existing file or project access checks. Moved or deleted files and unavailable local services produce an error instead of downloading a replacement copy. Save pending spreadsheet edits before opening the file in a system application.
+
+Update both the desktop frontend and bundled local backend for this behavior. Updating only the cloud service does not update file actions in installed clients.
+
+New standalone conversations in hybrid mode default to local execution. You can switch to cloud before sending, and the choice is saved for that conversation. Project conversations follow project ownership; existing conversations retain their execution location.

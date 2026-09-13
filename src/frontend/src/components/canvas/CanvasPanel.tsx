@@ -1,18 +1,20 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import {
-  DownloadOutlined, SaveOutlined,
+  SaveOutlined,
   CheckOutlined, FileExclamationOutlined,
 } from '@ant-design/icons';
 import { t } from '../../i18n';
 import { getFileIconSrc } from '../../utils/fileIcon';
-import { Button, message } from 'antd';
+import { message } from 'antd';
 import { useCanvasStore } from '../../stores/canvasStore';
 import type { CanvasArtifact } from '../../stores/canvasStore';
 import { UniverSpreadsheet } from './UniverSpreadsheet';
 import { CitationMarkdownBlock } from '../citation';
 import { CanvasTabBar } from './CanvasTabBar';
 import type { UniverSpreadsheetHandle } from './UniverSpreadsheet';
-import { authFetch, overwriteFile } from '../../api';
+import { authFetch, overwriteFile, LOCAL_TARGET_HEADER } from '../../api';
+import { artifactUrl, artifactOrigin, withUrlParams } from '../../utils/artifactAccess';
+import { ArtifactFileAction } from '../file/ArtifactFileAction';
 import {
   PreviewFileTooLargeError,
   exceedsPreviewLimit,
@@ -22,7 +24,6 @@ import {
   readLimitedText,
 } from '../../utils/filePreviewSafety';
 
-const effectiveApiUrl = (import.meta.env.VITE_API_BASE_URL as string || '').trim() || '/api';
 
 /* ── helpers ── */
 
@@ -143,7 +144,7 @@ function DocxRenderer({ url, maxBytes }: { url: string; maxBytes: number }) {
 /* XlsxRenderer removed — replaced by UniverSpreadsheet */
 
 function PdfRenderer({ url }: { url: string }) {
-  const inlineUrl = url.includes('?') ? `${url}&inline=1` : `${url}?inline=1`;
+  const inlineUrl = withUrlParams(url, { inline: '1' });
   return (
     <div className="jx-canvas-pdf">
       <object data={inlineUrl} type="application/pdf" className="jx-canvas-pdf-frame">
@@ -303,8 +304,7 @@ function HtmlRenderer({ url, version }: { url: string; version: string | number 
   // URL → forces a network fetch. The ``key`` prop on the iframe element
   // additionally forces React to fully remount the iframe so the new src
   // takes effect even when the parent component doesn't unmount.
-  const sep = url.includes('?') ? '&' : '?';
-  const inlineUrl = `${url}${sep}inline=1&v=${encodeURIComponent(version)}`;
+  const inlineUrl = withUrlParams(url, { inline: '1', v: String(version) });
   return (
     <div className="jx-canvas-html">
       <iframe
@@ -342,14 +342,12 @@ function LargeFileRenderer({
       <FileExclamationOutlined className="jx-canvas-largeFileIcon" />
       <p className="jx-canvas-largeFileTitle">{t('文件较大，已停止在线预览')}</p>
       <p className="jx-canvas-largeFileHint">
-        {t('当前文件 {size}，超过此格式 {limit} 的安全预览上限。为避免页面卡顿，请下载后在本地打开。', {
+        {t('当前文件 {size}，超过此格式 {limit} 的安全预览上限。请使用下方文件操作在系统应用中查看。', {
           size: formatPreviewBytes(artifact.size || 0),
           limit: formatPreviewBytes(limitBytes),
         })}
       </p>
-      <Button type="primary" icon={<DownloadOutlined />} onClick={onDownload}>
-        {t('下载后打开')}
-      </Button>
+      <ArtifactFileAction file={artifact} className="jx-dlCard-btn" onDownload={onDownload} />
     </div>
   );
 }
@@ -430,7 +428,7 @@ export function CanvasPanel() {
 
   if (!isOpen || activeView !== 'file' || !artifact) return null;
 
-  const fileUrl = `${effectiveApiUrl}${artifact.url}`;
+  const fileUrl = artifactUrl(artifact);
   const category = getFileCategory(artifact);
   const isXlsx = category === 'xlsx';
   const previewLimitBytes = getPreviewLimitBytes(category);
@@ -478,7 +476,7 @@ export function CanvasPanel() {
       const exported = await univerRef.current.exportXlsx();
       const file = new File([exported], artifact.name, { type: exported.type });
       // Overwrite in-place — same file_id, same URL, content updated on server
-      const result = await overwriteFile(artifact.file_id, file);
+      const result = await overwriteFile(artifact.file_id, file, artifactOrigin(artifact) === 'local' ? { [LOCAL_TARGET_HEADER]: 'local' } : {});
       updateArtifact({ size: result.size });
       setXlsxDirty(false);
       univerRef.current?.resetDirty();
@@ -493,6 +491,7 @@ export function CanvasPanel() {
   };
 
   const renderContent = () => {
+    if (!fileUrl) return <div className="jx-canvas-error">{t('缺少下载链接')}</div>;
     if (previewTooLarge && previewLimitBytes !== null) {
       return (
         <LargeFileRenderer
@@ -516,7 +515,7 @@ export function CanvasPanel() {
           />
         );
       case 'pdf': return <PdfRenderer url={fileUrl} />;
-      case 'ppt': return <PptRenderer url={`${fileUrl}/preview?format=pdf`} maxBytes={maxPreviewBytes} />;
+      case 'ppt': return <PptRenderer url={artifactUrl(artifact, { preview: true, params: { format: 'pdf' } })} maxBytes={maxPreviewBytes} />;
       case 'image': return <ImageRenderer url={fileUrl} name={artifact.name} />;
       case 'text': return <TextRenderer url={fileUrl} maxBytes={maxPreviewBytes} />;
       case 'markdown': return <MarkdownRenderer url={fileUrl} maxBytes={maxPreviewBytes} />;
@@ -560,9 +559,8 @@ export function CanvasPanel() {
                 : <SaveOutlined />}
             </button>
           )}
-          <button className="jx-canvas-actionBtn" onClick={handleDownload} title={t('下载文件')}>
-            <DownloadOutlined />
-          </button>
+          <ArtifactFileAction file={artifact} className="jx-canvas-actionBtn"
+            onDownload={handleDownload} disabled={isXlsx && xlsxDirty} />
         </div>
       </div>
 

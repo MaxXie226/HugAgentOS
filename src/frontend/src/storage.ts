@@ -491,9 +491,17 @@ export function isDraftChatId(userId: string | null | undefined, chatId: string)
   return !!chatId && readDraftChatIds(userId).includes(chatId);
 }
 
+// Runtime evidence of a newly allocated ID. The persisted draft registry also
+// contains old sent chats, so it cannot authorize changing their execution location.
+const newDraftIds = new Set<string>();
+export function isNewDraftChatId(chatId: string): boolean {
+  return newDraftIds.has(chatId);
+}
+
 /** 新开一段本地对话：生成 id 的同时登记为草稿。 */
 export function newDraftChatId(userId: string | null | undefined): string {
   const id = nowId('chat');
   registerDraftChatId(userId, id);
+  newDraftIds.add(id);
   return id;
 }

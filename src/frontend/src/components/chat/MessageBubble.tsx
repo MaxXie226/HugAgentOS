@@ -472,7 +472,7 @@ export const MessageBubble = memo(function MessageBubble({ m, messageIndex, curr
       artifacts = artifacts.filter((a) => allow.has(String(a.file_id)));
     }
     if (artifacts.length === 0) return null;
-    return <ArtifactCardList artifacts={artifacts} />;
+    return <ArtifactCardList artifacts={artifacts} chatId={currentChatId} />;
   };
 
   /** Open citation detail */

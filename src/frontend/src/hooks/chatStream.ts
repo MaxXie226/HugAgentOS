@@ -677,7 +677,7 @@ export async function processChatStream(resp: Response, opts: ChatStreamOptions)
       if (typeof fileId === 'string' && fileId.trim()) existingFileIds.add(fileId.trim());
     }
     let changed = false;
-    let latestHtml: { file_id: string; name: string; url: string; mime_type?: string; size?: number } | null = null;
+    let latestHtml: { file_id: string; name: string; url: string; mime_type?: string; size?: number; origin?: 'local' | 'cloud' } | null = null;
     for (const artifact of artifacts) {
       const output = normalizeArtifactOutput(artifact);
       if (!output) continue;
@@ -695,6 +695,7 @@ export async function processChatStream(resp: Response, opts: ChatStreamOptions)
       if (isHtml) {
         latestHtml = {
           file_id: fileId,
+          origin: output.origin === 'local' || output.origin === 'cloud' ? output.origin : undefined,
           name: String(output.name || 'preview.html'),
           url: String(output.url || ''),
           mime_type: typeof output.mime_type === 'string' ? output.mime_type : undefined,

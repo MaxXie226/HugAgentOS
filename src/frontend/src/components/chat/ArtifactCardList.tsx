@@ -1,10 +1,11 @@
 import { message } from 'antd';
-import { CopyOutlined, DownloadOutlined, EyeOutlined } from '@ant-design/icons';
+import { CopyOutlined, EyeOutlined } from '@ant-design/icons';
 import { getFileIconSrc } from '../../utils/fileIcon';
 import { useCanvasStore, useUIStore } from '../../stores';
 import { t } from '../../i18n';
+import { ArtifactFileAction } from '../file/ArtifactFileAction';
+import { artifactOrigin, artifactUrl, type ArtifactLocation } from '../../utils/artifactAccess';
 
-const effectiveApiUrl = (import.meta.env.VITE_API_BASE_URL as string || '').trim() || '/api';
 
 function formatFileSize(bytes: number) {
   if (bytes < 1024) return `${bytes} B`;
@@ -20,7 +21,7 @@ function renderFileIcon(name: string) {
   );
 }
 
-export interface ArtifactRef {
+export interface ArtifactRef extends ArtifactLocation {
   file_id: string;
   name?: string;
   url?: string;
@@ -32,7 +33,7 @@ export interface ArtifactRef {
  *  copy/download overlay buttons, other files get a download/preview card.
  *  Same primitives the regular chat bubble renders for assistant outputs;
  *  shared so the batch panel and chat list stay visually consistent. */
-export function ArtifactCardList({ artifacts }: { artifacts: ArtifactRef[] }) {
+export function ArtifactCardList({ artifacts, chatId }: { artifacts: ArtifactRef[]; chatId?: string }) {
   const setPreviewImage = useUIStore((s) => s.setPreviewImage);
   const openCanvas = useCanvasStore((s) => s.openCanvas);
 
@@ -40,9 +41,11 @@ export function ArtifactCardList({ artifacts }: { artifacts: ArtifactRef[] }) {
 
   return (
     <div className="jx-artifactCards">
-      {artifacts.map((art) => {
+      {artifacts.map((source) => {
+        const art = { ...source, chat_id: source.chat_id || chatId };
+        art.origin = artifactOrigin(art);
         const isImage = typeof art.mime_type === 'string' && art.mime_type.startsWith('image/');
-        const fileUrl = `${effectiveApiUrl}${art.url || ''}`;
+        const fileUrl = artifactUrl(art);
 
         if (isImage) {
           return (
@@ -121,15 +124,7 @@ export function ArtifactCardList({ artifacts }: { artifacts: ArtifactRef[] }) {
                 >
                   <CopyOutlined />
                 </button>
-                <a
-                  href={fileUrl}
-                  download={art.name}
-                  className="jx-imgCard-overlayBtn"
-                  title={t('下载图片')}
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  <DownloadOutlined />
-                </a>
+                <ArtifactFileAction file={art} className="jx-imgCard-overlayBtn" />
               </div>
             </div>
           );
@@ -149,6 +144,8 @@ export function ArtifactCardList({ artifacts }: { artifacts: ArtifactRef[] }) {
                 className="jx-dlCard-previewBtn"
                 onClick={() => openCanvas({
                   file_id: art.file_id,
+                  origin: art.origin,
+                  chat_id: art.chat_id,
                   name: art.name || t('文件'),
                   url: art.url || '',
                   mime_type: art.mime_type,
@@ -157,9 +154,7 @@ export function ArtifactCardList({ artifacts }: { artifacts: ArtifactRef[] }) {
               >
                 <EyeOutlined /> {t('预览')}
               </button>
-              <a href={fileUrl} download={art.name} className="jx-dlCard-btn">
-                <DownloadOutlined /> {t('下载')}
-              </a>
+              <ArtifactFileAction file={art} className="jx-dlCard-btn" />
             </div>
           </div>
         );

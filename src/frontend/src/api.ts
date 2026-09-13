@@ -2668,7 +2668,7 @@ export async function uploadFile(
 }
 
 /** Overwrite existing file content in-place (same file_id & URL). */
-export async function overwriteFile(fileId: string, file: File): Promise<UploadedFile> {
+export async function overwriteFile(fileId: string, file: File, headers: Record<string, string> = {}): Promise<UploadedFile> {
   const url = `${getApiUrl()}/v1/file/${encodeURIComponent(fileId)}`;
   const formData = new FormData();
   formData.append('file', file);
@@ -2676,6 +2676,7 @@ export async function overwriteFile(fileId: string, file: File): Promise<Uploade
   const response = await fetch(url, {
     method: 'PUT',
     credentials: 'include',
+    headers,
     body: formData,
   });
 

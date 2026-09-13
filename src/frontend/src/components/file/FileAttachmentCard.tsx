@@ -1,6 +1,8 @@
 import { LoadingOutlined, DownloadOutlined, CloseOutlined } from '@ant-design/icons';
 import { getFileIconSrc } from '../../utils/fileIcon';
 import { t } from '../../i18n';
+import { artifactUrl } from '../../utils/artifactAccess';
+import { ArtifactFileAction } from './ArtifactFileAction';
 import { useCanvasStore, type CanvasArtifact } from '../../stores/canvasStore';
 
 const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg']);
@@ -22,6 +24,10 @@ export default function FileAttachmentCard({
 }) {
   const openCanvas = useCanvasStore((s) => s.openCanvas);
   const canPreview = !!artifact && !loading;
+  if (artifact) {
+    downloadHref = artifactUrl(artifact);
+    if (previewUrl) previewUrl = artifactUrl(artifact, { params: { inline: 'true' } });
+  }
   const ext = (name.split('.').pop() ?? '').toLowerCase();
   const isImage = IMAGE_EXTS.has(ext);
 
@@ -69,10 +75,9 @@ export default function FileAttachmentCard({
           aria-label={`${t('预览')} ${name}`} title={`${t('预览')} ${name}`}
           onClick={() => openCanvas(artifact)} />
         {downloadHref && (
-          <a className="jx-fileCard-download" href={downloadHref} download={name}
-            aria-label={t('下载 {name}', { name })} title={t('下载 {name}', { name })}>
-            <DownloadOutlined aria-hidden="true" />
-          </a>
+          <span className="jx-fileCard-download">
+            <ArtifactFileAction file={artifact} className="jx-fileCard-nativeAction" />
+          </span>
         )}
       </div>
     );

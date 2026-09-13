@@ -620,8 +620,9 @@ export interface ChatItem {
   /** Whether this is an automation-generated chat (virtual sidebar entry) */
   automationRun?: boolean;
   /** 混合架构（桌面双模式）：该对话的运行位置。'local' = 在本机执行面运行、
-   *  会话保存在本机；未设置 = 云端。绑定项目的对话跟随项目归属，此字段不生效。 */
-  runTarget?: 'local';
+   *  会话保存在本机；'cloud' = 显式选择云端；旧记录未设置仍为云端。新草稿默认本机。
+   *  绑定项目的对话跟随项目归属。 */
+  runTarget?: 'local' | 'cloud';
   /** Which project this chat is mounted under (Claude-style workspaces).
    *  When present, sending a message automatically attaches project_id so the backend
    *  injects the project instructions / folder scope into ctx. */
@@ -1416,6 +1417,9 @@ export interface AutomationNotification {
 }
 
 export interface ResourceItem extends EditionResourceFields {
+  origin?: 'local' | 'cloud';
+  chat_id?: string;
+  project_id?: string;
   id: string;
   type: 'document' | 'image' | 'favorite';
   name: string;
