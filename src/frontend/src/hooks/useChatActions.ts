@@ -9,6 +9,7 @@ import { SUMMARY_MAX_ROUNDS } from '../utils/constants';
 import { formatDateKey } from '../utils/date';
 import { useChatStore, useCatalogStore, useUIStore, useAutomationChatStore } from '../stores';
 import { usePageConfigStore } from '../stores/pageConfigStore';
+import { useProjectStore } from '../stores/projectStore';
 import type { ChatItem, ChatMessage } from '../types';
 import { ensureFullMessages } from './useChatInit';
 
@@ -31,6 +32,8 @@ export function useChatActions(effectiveApiUrl: string) {
   }
 
   function newChat(inputRef: React.RefObject<HTMLTextAreaElement | null>) {
+    // This entry leaves the project page for a standalone conversation.
+    useProjectStore.getState().closeCurrentProject();
     const id = newDraftChatId(useChatStore.getState().currentUserId);
     if (useAutomationChatStore.getState().activeGroup) {
       useAutomationChatStore.getState().exitAutomationChat();

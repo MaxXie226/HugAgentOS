@@ -31,6 +31,14 @@ class LocalStorageBackend(StorageBackend):
             logger.warning(f"Path traversal attempt detected: {storage_key}, using sanitized path")
         return full_path
 
+    def resolve_file_path(self, storage_key: str) -> Path:
+        """Resolve an existing original file, rejecting traversal and redirected paths."""
+        root = self.base_path.resolve()
+        full = (root / storage_key.lstrip("/")).resolve()
+        if not full.is_relative_to(root) or not full.is_file():
+            raise FileNotFoundError("文件已移动或删除")
+        return full
+
     def upload(self, file_path: str, storage_key: str) -> str:
         try:
             source = Path(file_path)

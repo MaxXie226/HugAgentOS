@@ -54,7 +54,8 @@ function looksLikeMarkdown(text: string): boolean {
  *  inline images), buildHistorySegments to peel off any embedded `<think>`
  *  blocks, plus the existing tool-result handling for diverse outputs.
  */
-function BatchItemBubble({ item }: {
+function BatchItemBubble({ item, chatId }: {
+  chatId?: string;
   item: ReturnType<typeof useBatchStore.getState>['plans'][string]['results'][number];
 }) {
   // Same global toggle the chat bubble reads — keeps the batch panel and
@@ -110,7 +111,7 @@ function BatchItemBubble({ item }: {
               item, so this surfaces each row's generated documents the same
               way the regular chat bubble does. */}
           {Array.isArray(item.artifacts) && item.artifacts.length > 0 && (
-            <ArtifactCardList artifacts={item.artifacts as unknown as ArtifactRef[]} />
+            <ArtifactCardList artifacts={item.artifacts as unknown as ArtifactRef[]} chatId={chatId} />
           )}
         </Space>
       ) : (
@@ -282,11 +283,11 @@ export function BatchProgressPanel({ planId }: Props) {
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.25, ease: EASE.brandOut }}
             >
-              <BatchItemBubble item={item} />
+              <BatchItemBubble item={item} chatId={plan.meta.chat_id} />
             </motion.div>
           ) : (
             <div key={item.index}>
-              <BatchItemBubble item={item} />
+              <BatchItemBubble item={item} chatId={plan.meta.chat_id} />
             </div>
           )
         ))}

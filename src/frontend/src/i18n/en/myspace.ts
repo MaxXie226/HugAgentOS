@@ -1,5 +1,15 @@
 /** 英文字典（myspace 域）：key 为中文原文，value 为英文译文。 */
 export const MYSPACE_DICT: Record<string, string> = {
+  '此文件不在本机': 'This file is not stored on this computer',
+  '缺少文件标识': 'Missing file identifier',
+  '无法打开文件': 'Unable to open file',
+  '无法获取本机文件路径': 'Unable to locate the local file',
+  '请先保存文件': 'Save the file first',
+  '打开文件': 'Open file',
+  '打开所在文件夹': 'Open containing folder',
+  '打开选项': 'Open options',
+  '当前文件 {size}，超过此格式 {limit} 的安全预览上限。请使用下方文件操作在系统应用中查看。': 'This file ({size}) exceeds the {limit} preview limit. Use the file actions below to view it in a system application.',
+
   // ── Tab labels ──────────────────────────────────────────────────────
   '文件资产': 'File Assets',
   '云文档': 'Cloud Docs',

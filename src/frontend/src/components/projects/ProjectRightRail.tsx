@@ -455,6 +455,7 @@ function FilesCard() {
   const previewItem = previewFile
     ? {
         id: previewFile.artifact_id,
+        origin: isLocal ? 'local' : 'cloud',
         file_id: previewFile.artifact_id,
         name: leafName(previewFile),
         mime_type: previewFile.mime_type,

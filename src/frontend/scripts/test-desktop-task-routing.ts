@@ -5,6 +5,8 @@ import {
   createLoop, startLoop, resumeLoop, getLoop, steerLoop, cancelLoop, getSession,
 } from '../src/api';
 import { useChatStore } from '../src/stores/chatStore';
+import { saveActiveProjectId } from '../src/stores/projectSession';
+import { flushChatStore, loadChatStore, registerDraftChatId } from '../src/storage';
 
 const requests: Array<{ url: string; init?: RequestInit }> = [];
 globalThis.fetch = async (url, init) => {
@@ -81,3 +83,51 @@ for (const request of requests) {
   assert.equal(new Headers(request.init?.headers).get('x-hugagent-target'), null, request.url);
 }
 console.log('desktop task routing: selector, restore, plan lifecycle, loop lifecycle, project and cloud controls passed');
+
+// New dual-mode conversations default to local before their first request.
+const memory = new Map<string, string>();
+const storage = {
+  getItem: (key: string) => memory.get(key) ?? null,
+  setItem: (key: string, value: string) => { memory.set(key, value); },
+  removeItem: (key: string) => { memory.delete(key); },
+};
+(globalThis as any).localStorage = storage;
+(globalThis as any).window = { localStorage: storage, sessionStorage: storage, setTimeout, clearTimeout };
+setHybridDual(true);
+useChatStore.setState({ currentUserId: 'default-target-test' });
+useChatStore.getState().newChat();
+const draft = useChatStore.getState().currentChatId;
+assert.equal(chatTargetHeaders(draft)['x-hugagent-target'], 'local', 'fresh desktop draft defaults to local');
+assert.equal(isRegisteredLocalChat(draft), false, 'default does not lock the selector');
+useChatStore.getState().setChatRunTarget(draft, undefined);
+useChatStore.getState().setCurrentChatId(draft);
+assert.deepEqual(chatTargetHeaders(draft), {}, 'explicit cloud selection survives navigation');
+flushChatStore();
+assert.equal(loadChatStore('default-target-test').chats[draft].runTarget, 'cloud', 'cloud choice is persisted');
+registerDraftChatId('default-target-test', 'old-empty-cloud');
+const oldCloud = { ...useChatStore.getState().store.chats[draft], id: 'old-empty-cloud', runTarget: undefined };
+useChatStore.getState().updateStore(s => ({ chats: { ...s.chats, [oldCloud.id]: oldCloud }, order: [...s.order, oldCloud.id] }));
+useChatStore.getState().setCurrentChatId(oldCloud.id);
+assert.deepEqual(chatTargetHeaders(oldCloud.id), {}, 'old cloud history with unloaded messages stays cloud');
+registerDraftChatId('default-target-test', 'evicted-cloud');
+useChatStore.getState().setCurrentChatId('evicted-cloud');
+assert.deepEqual(chatTargetHeaders('evicted-cloud'), {}, 'evicted old cloud history stays cloud');
+saveActiveProjectId('cloud-project');
+useChatStore.getState().newChat();
+assert.deepEqual(chatTargetHeaders(useChatStore.getState().currentChatId), {}, 'active cloud project overrides local default');
+saveActiveProjectId(null);
+useChatStore.getState().newChat();
+const nextDraft = useChatStore.getState().currentChatId;
+assert.equal(chatTargetHeaders(nextDraft)['x-hugagent-target'], 'local');
+useChatStore.getState().bindChatProject(nextDraft, 'cloud-project', 'Cloud');
+assert.deepEqual(chatTargetHeaders(nextDraft), {}, 'cloud project still overrides default');
+useChatStore.getState().setCurrentChatId('existing-cloud-session');
+assert.deepEqual(chatTargetHeaders('existing-cloud-session'), {}, 'unloaded cloud history must not move');
+useChatStore.getState().newChat();
+useChatStore.getState().enterChatMode('plan');
+assert.equal(chatTargetHeaders(useChatStore.getState().currentChatId)['x-hugagent-target'], 'local');
+setHybridDual(false);
+useChatStore.getState().newChat();
+assert.deepEqual(chatTargetHeaders(useChatStore.getState().currentChatId), {}, 'web and cloud-only stay cloud');
+flushChatStore();
+console.log('desktop defaults: local drafts, explicit cloud choice, project ownership, history and web passed');

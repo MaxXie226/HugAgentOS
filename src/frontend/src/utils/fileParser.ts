@@ -36,6 +36,7 @@ export function normalizeArtifactOutput(raw: unknown): Record<string, unknown> |
     ? artifact.type.trim()
     : t('附件');
   const output: Record<string, unknown> = {
+    ...(artifact.origin === 'local' || artifact.origin === 'cloud' ? { origin: artifact.origin } : {}),
     ok: true,
     file_id: fileId,
     url,
@@ -57,29 +58,33 @@ export function extractArtifactOutputs(raw: unknown): Record<string, unknown>[] 
   const results: Record<string, unknown>[] = [];
   const seen = new Set<string>();
 
-  const pushOutput = (candidate: unknown) => {
+  const pushOutput = (candidate: unknown, origin?: 'local' | 'cloud') => {
     const output = normalizeArtifactOutput(candidate);
     if (!output) return;
+    if (!output.origin && origin) output.origin = origin;
     const fileId = String(output.file_id);
     if (seen.has(fileId)) return;
     seen.add(fileId);
     results.push(output);
   };
 
-  const visit = (candidate: unknown) => {
+  const visit = (candidate: unknown, inheritedOrigin?: 'local' | 'cloud') => {
     if (!candidate) return;
     if (Array.isArray(candidate)) {
-      for (const item of candidate) visit(item);
+      for (const item of candidate) visit(item, inheritedOrigin);
       return;
     }
     if (typeof candidate !== 'object') return;
 
-    pushOutput(candidate);
-
     const record = candidate as Record<string, unknown>;
-    if (Array.isArray(record.artifacts)) visit(record.artifacts);
-    if (Array.isArray(record.files)) visit(record.files);
-    if (record.result && record.result !== candidate) visit(record.result);
+    const metadata = record.metadata && typeof record.metadata === 'object'
+      ? record.metadata as Record<string, unknown> : {};
+    const explicitOrigin = record.origin || metadata.origin;
+    const origin = explicitOrigin === 'local' || explicitOrigin === 'cloud' ? explicitOrigin : inheritedOrigin;
+    pushOutput(candidate, origin);
+    if (Array.isArray(record.artifacts)) visit(record.artifacts, origin);
+    if (Array.isArray(record.files)) visit(record.files, origin);
+    if (record.result && record.result !== candidate) visit(record.result, origin);
   };
 
   visit(raw);

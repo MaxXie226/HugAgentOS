@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { t } from '../i18n';
 import { authFetch, checkSession, listActiveBatchPlans, getBatchPlan, chatTargetHeaders, isHybridDual, registerLocalChat, toPlanProgress, LOCAL_TARGET_HEADER } from '../api';
-import { nowId, saveCatalog } from '../storage';
+import { newDraftChatId, saveCatalog } from '../storage';
 import { buildHistorySegments } from '../utils/segments';
 import { attachArtifactsToToolCalls } from '../utils/fileParser';
 import { isAutomationHistoryChat } from '../utils/history';
@@ -137,7 +137,7 @@ function sessionToChatItem(s: any, prior?: ChatItem): ChatItem {
       ? s.project_id
       : (prior?.projectId || undefined),
     projectName: prior?.projectName || undefined,
-    ...(prior?.runTarget === 'local' ? { runTarget: 'local' as const } : {}),
+    ...(prior?.runTarget ? { runTarget: prior.runTarget } : {}),
   };
 }
 
@@ -668,7 +668,7 @@ export function useChatInit() {
           // 历史；后端没有（正在流式输出首条消息、或本地空会话）→ 保留同一 id：
           // 空会话渲染出来就是空首页，与生成新 id 的 UX 等价，但指针稳定——
           // 不会把新 id 写回共享 localStorage 去覆盖别的标签页的恢复目标。
-          const targetChatId = isFreshLogin ? nowId('chat') : (prevChatId || nowId('chat'));
+          const targetChatId = isFreshLogin ? newDraftChatId(authUserId) : (prevChatId || newDraftChatId(authUserId));
           if (isFreshLogin) setPanel('chat');
           setCurrentChatId(targetChatId);
           // Bump epoch so the lazy-load messages effect re-fires even when

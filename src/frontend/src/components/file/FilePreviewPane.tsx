@@ -1,15 +1,16 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
-import { Button, Spin } from 'antd';
+import { Spin } from 'antd';
 import { t } from '../../i18n';
 import {
-  DownloadOutlined,
   EyeOutlined,
   FileUnknownOutlined,
   ExclamationCircleOutlined,
 } from '@ant-design/icons';
 import type { ResourceItem } from '../../types';
-import { getApiUrl, authFetch, maybeLocalizeUrl } from '../../api';
+import { authFetch } from '../../api';
+import { artifactUrl } from '../../utils/artifactAccess';
+import { ArtifactFileAction } from './ArtifactFileAction';
 import { mdToHtml } from '../../utils/markdown';
 import { getFileIconSrc } from '../../utils/fileIcon';
 import {
@@ -90,18 +91,11 @@ function detectKind(item: ResourceItem): ViewKind {
 }
 
 function buildRawUrl(item: ResourceItem, inline = false): string {
-  const base = item.download_url || (item.file_id ? `/files/${item.file_id}` : '');
-  if (!base) return '';
-  // 混合路由：本地项目文件的 raw 链接可能被用作 <img>/<iframe> src（无法带请求头），
-  // 归属本机时追加 hg_target=local 让反代按 query 路由。
-  const url = maybeLocalizeUrl(`${getApiUrl()}${base}`);
-  if (!inline) return url;
-  return url.includes('?') ? `${url}&inline=true` : `${url}?inline=true`;
+  return artifactUrl(item, { params: inline ? { inline: 'true' } : {} });
 }
 
 function buildOfficePreviewUrl(item: ResourceItem): string {
-  if (!item.file_id) return '';
-  return `${getApiUrl()}/files/${item.file_id}/preview`;
+  return artifactUrl(item, { preview: true });
 }
 
 // Hide the browser's built-in PDF viewer chrome (toolbar / sidebar / scrollbar).
@@ -110,7 +104,10 @@ const PDF_VIEWER_PARAMS = '#toolbar=0&navpanes=0&scrollbar=0&view=FitH';
 
 function withPdfViewerParams(url: string): string {
   if (!url) return url;
-  return `${url}${PDF_VIEWER_PARAMS}`;
+  const [base, fragment = ''] = url.split('#', 2);
+  const params = new URLSearchParams(fragment);
+  for (const [key, value] of new URLSearchParams(PDF_VIEWER_PARAMS.slice(1))) params.set(key, value);
+  return `${base}#${params}`;
 }
 
 // ─── small async-text hook ─────────────────────────────────────────
@@ -488,17 +485,7 @@ function UnsupportedView({ item }: { item: ResourceItem }) {
       <div className="jx-spaceImportPreview-statusText">{t('此格式暂不支持预览')}</div>
       <div className="jx-spaceImportPreview-statusSub">{item.name}</div>
       {dl && (
-        <Button
-          type="primary"
-          ghost
-          icon={<DownloadOutlined />}
-          href={dl}
-          target="_blank"
-          rel="noreferrer"
-          style={{ marginTop: 12 }}
-        >
-          {t('下载文件')}
-        </Button>
+        <ArtifactFileAction file={item} className="jx-dlCard-btn" />
       )}
     </div>
   );
@@ -511,15 +498,13 @@ function LargeFileView({ item, limitBytes }: { item: ResourceItem; limitBytes: n
       <ExclamationCircleOutlined style={{ fontSize: 36, color: 'var(--color-warning)' }} />
       <div className="jx-spaceImportPreview-statusText">{t('文件较大，已停止在线预览')}</div>
       <div className="jx-spaceImportPreview-statusSub">
-        {t('当前文件 {size}，超过此格式 {limit} 的安全预览上限。为避免页面卡顿，请下载后在本地打开。', {
+        {t('当前文件 {size}，超过此格式 {limit} 的安全预览上限。请使用下方文件操作在系统应用中查看。', {
           size: formatPreviewBytes(item.size || 0),
           limit: formatPreviewBytes(limitBytes),
         })}
       </div>
       {dl && (
-        <Button type="primary" icon={<DownloadOutlined />} href={dl} style={{ marginTop: 12 }}>
-          {t('下载后打开')}
-        </Button>
+        <ArtifactFileAction file={item} className="jx-dlCard-btn" />
       )}
     </div>
   );
@@ -603,16 +588,7 @@ export function FilePreviewPane({ item }: FilePreviewPaneProps) {
           {item.name}
         </div>
         {dlUrl && (
-          <a
-            className="jx-spaceImportPreview-headerAction"
-            href={dlUrl}
-            target="_blank"
-            rel="noreferrer"
-            download={item.name}
-            title={t('下载原文件')}
-          >
-            <DownloadOutlined />
-          </a>
+          <ArtifactFileAction file={item} className="jx-spaceImportPreview-headerAction" />
         )}
       </div>
       <div className="jx-spaceImportPreview-body">

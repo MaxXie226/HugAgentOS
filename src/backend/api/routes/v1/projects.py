@@ -33,7 +33,7 @@ from core.db.models import Artifact
 from core.infra.responses import created_response, paginated_response, success_response
 from core.services.project_file_service import ProjectFileService
 from core.services.project_service import ProjectService
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -279,6 +279,36 @@ async def get_local_project_file(
     仅本地项目 + 桌面本地模式可用；路径经 realpath 归一后必须仍落在项目根目录内，
     杜绝 ``..`` / 符号链接越界读取。
     """
+    full = _local_project_file_path(path, access)
+    mime = mimetypes.guess_type(full)[0] or "application/octet-stream"
+    return FileResponse(full, media_type=mime)
+
+
+@router.get("/{project_id}/local-files/location", summary="获取本地项目文件及所在文件夹")
+async def get_local_project_file_location(
+    path: str = Query(...),
+    access: ProjectAccess = Depends(require_project_access("view")),
+):
+    full = _local_project_file_path(path, access)
+    return success_response(data={"path": full, "folder_path": os.path.dirname(full)})
+
+
+@router.get("/{project_id}/local-files/raw/preview", summary="预览本地项目 Office 文件")
+def preview_local_project_file(
+    background_tasks: BackgroundTasks,
+    path: str = Query(...),
+    format: str = Query("pdf"),
+    access: ProjectAccess = Depends(require_project_access("view")),
+):
+    from api.routes.files import render_office_file
+
+    if format != "pdf":
+        raise HTTPException(status_code=400, detail="Unsupported preview format")
+    full = _local_project_file_path(path, access)
+    return render_office_file(full, "project-preview", background_tasks)
+
+
+def _local_project_file_path(path: str, access: ProjectAccess) -> str:
     if access.project.kind != "local" or not local_mode_enabled():
         raise HTTPException(status_code=404, detail="文件不存在")
     local = (access.project.extra_data or {}).get("local") or {}
@@ -289,9 +319,9 @@ async def get_local_project_file(
     if full != root and not full.startswith(root + os.sep):
         raise HTTPException(status_code=403, detail="路径越界")
     if not os.path.isfile(full):
-        raise HTTPException(status_code=404, detail="文件不存在")
-    mime = mimetypes.guess_type(full)[0] or "application/octet-stream"
-    return FileResponse(full, media_type=mime)
+        raise HTTPException(status_code=404, detail="文件已移动或删除")
+    return full
+
 
 
 @router.post("/{project_id}/files/upload", summary="直传文件到项目（写入挂钩文件夹）")

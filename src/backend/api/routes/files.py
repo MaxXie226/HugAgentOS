@@ -11,6 +11,8 @@ from typing import Any, Optional
 from core.artifacts.store import get_artifact
 from core.auth.backend import UserContext, require_auth
 from core.content.office import find_libreoffice_binary
+from core.config.local_mode import local_mode_enabled
+from core.storage.local import LocalStorageBackend
 from core.db.engine import get_db
 from core.db.repository import AuditLogRepository
 from core.infra.exceptions import StorageError
@@ -49,6 +51,7 @@ def _load_artifact_item(file_id: str, db: Session) -> dict[str, Any]:
             "storage_key": artifact_obj.storage_key,
             "metadata": {
                 "from_database": True,
+                "deleted": artifact_obj.deleted_at is not None,
                 **artifact_access_metadata(artifact_obj),
             },
         }
@@ -57,6 +60,36 @@ def _load_artifact_item(file_id: str, db: Session) -> dict[str, Any]:
     if item is None:
         raise HTTPException(status_code=404, detail=f"File not found: {file_id}")
     return item
+
+
+@router.get("/{file_id}/local-path", summary="获取本机文件及所在文件夹")
+def local_file_location(
+    file_id: str,
+    user: UserContext = Depends(require_auth()),
+    db: Session = Depends(get_db),
+):
+    # Never return a cloud server filesystem path, even if that server uses local storage.
+    if not local_mode_enabled():
+        raise HTTPException(status_code=404, detail="本机文件操作不可用")
+    item = _load_artifact_item(file_id, db)
+    if (item.get("metadata") or {}).get("deleted"):
+        raise HTTPException(status_code=404, detail="文件已移动或删除")
+    _authorize_access(
+        item=item, file_id=file_id, user=user, db=db, denied_action="file.open.denied"
+    )
+    storage = get_storage()
+    if not isinstance(storage, LocalStorageBackend):
+        raise HTTPException(status_code=409, detail="文件不在本机存储中")
+    try:
+        key = item.get("storage_key")
+        if not key and item.get("path"):
+            key = str(Path(item["path"]).resolve().relative_to(storage.base_path.resolve()))
+        if not key:
+            raise FileNotFoundError
+        path = storage.resolve_file_path(str(key))
+    except (ValueError, OSError):
+        raise HTTPException(status_code=404, detail="文件已移动或删除") from None
+    return {"path": str(path), "folder_path": str(path.parent)}
 
 
 def _record_audit(
@@ -407,13 +440,13 @@ def preview_file(
         file_id=file_id,
         background_tasks=background_tasks,
     )
-    try:
-        pdf_path, temp_dir = _convert_office_to_pdf(source_path, file_id)
-    except RuntimeError as exc:
-        logger.error("Failed to render Office preview for %s: %s", file_id, exc)
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-    background_tasks.add_task(_cleanup_path, temp_dir)
+    response = render_office_file(
+        source_path,
+        file_id,
+        background_tasks,
+        filename=str(item.get("name", file_id)),
+        mime_type=str(item.get("mime_type", "")),
+    )
     _record_audit(
         user=user,
         db=db,
@@ -428,9 +461,31 @@ def preview_file(
         },
     )
 
+    return response
+
+
+def render_office_file(
+    source_path: str,
+    file_id: str,
+    background_tasks: BackgroundTasks,
+    *,
+    filename: Optional[str] = None,
+    mime_type: str = "",
+) -> FileResponse:
+    """Render a file after the caller has resolved and authorized its original path."""
+    source = Path(source_path)
+    name = filename or source.name
+    if not _is_office_previewable({"name": name, "mime_type": mime_type}):
+        raise HTTPException(status_code=400, detail="仅支持 Office 文件预览")
+    try:
+        pdf_path, temp_dir = _convert_office_to_pdf(source_path, file_id)
+    except RuntimeError as exc:
+        logger.error("Failed to render Office preview for %s: %s", file_id, exc)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    background_tasks.add_task(_cleanup_path, temp_dir)
     return FileResponse(
         path=pdf_path,
         media_type="application/pdf",
-        filename=f"{Path(str(item.get('name', file_id))).stem}.pdf",
+        filename=f"{Path(name).stem}.pdf",
         content_disposition_type="inline",
     )

@@ -660,8 +660,7 @@ export function useStreaming(
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          ...projectTargetHeaders(effectiveProjectId),
-          ...chatTargetHeaders(currentChatId),
+          ...(effectiveProjectId ? projectTargetHeaders(effectiveProjectId) : chatTargetHeaders(currentChatId)),
         },
         body: JSON.stringify({
           chat_id: currentChatId,
