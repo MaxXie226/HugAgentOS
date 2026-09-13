@@ -10,6 +10,7 @@ from core.llm.context_ir import (
     KIND_COMPACTION,
     SESSION_CONTEXT_META_KEY,
     make_text_context_item,
+    image_token_reserve,
 )
 from core.llm.model_steps import explode_history_rows
 
@@ -195,7 +196,11 @@ def _tool_output_text(output: Any) -> str:
     if isinstance(output, list):
         parts: List[str] = []
         for item in output:
-            if isinstance(item, dict):
+            if hasattr(item, "model_dump"):
+                item = item.model_dump(mode="json")
+            if image_token_reserve(item):
+                parts.append(f"[image: {item.get('name') or 'image attachment'}]")
+            elif isinstance(item, dict):
                 text = item.get("text")
                 parts.append(str(text) if text is not None else str(item))
             elif isinstance(item, str):
@@ -234,6 +239,8 @@ def render_content_for_summary(content: Any) -> str:
             t = item.get("text") or item.get("output") or ""
             if t:
                 pieces.append(str(t))
+        elif image_token_reserve(item) and btype == "data":
+            pieces.append(f"[image: {item.get('name') or 'image attachment'}]")
         elif btype == "thinking":
             t = item.get("thinking") or ""
             if t:
@@ -266,8 +273,13 @@ def _is_summary_row(row: Dict[str, Any]) -> bool:
 # ── Region selection ─────────────────────────────────────────────────────────
 
 
+def estimate_content_tokens(content: Any) -> int:
+    """Shared history estimate: rendered text plus an independent image reserve."""
+    return approx_token_count(render_content_for_summary(content)) + image_token_reserve(content)
+
+
 def _row_tokens(row: Dict[str, Any]) -> int:
-    return approx_token_count(render_content_for_summary(row.get("content")))
+    return estimate_content_tokens(row.get("content"))
 
 
 def _tool_call_ids(row: Dict[str, Any]) -> Tuple[List[str], List[str]]:

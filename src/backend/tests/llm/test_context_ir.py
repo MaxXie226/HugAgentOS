@@ -394,3 +394,58 @@ def test_manifest_is_sanitized_and_content_hash_sensitive():
     encoded = json.dumps(first.manifest, ensure_ascii=False)
     assert "do not persist" not in encoded
     assert first.manifest_hash != second.manifest_hash
+
+
+@pytest.mark.parametrize("policy", ["head_tail", "tail"])
+@pytest.mark.parametrize(
+    "total_budget,text_budget,action",
+    [
+        (5_000, 200, "truncated"),
+        (1_200, 20_000, "pruned"),
+    ],
+)
+def test_tool_text_budget_and_history_pruning_preserve_image_blocks(
+    policy, total_budget, text_budget, action
+):
+    from core.immutable import thaw_json
+
+    image = {
+        "type": "data",
+        "source": {"type": "base64", "media_type": "image/png", "data": "A" * 160_000},
+    }
+    call = _item(
+        "image-call",
+        {"type": "tool_call", "id": "image", "name": "read_image", "input": "{}"},
+        kind="tool_call",
+        policy="never",
+        role="assistant",
+        pair_id="image",
+    )
+    result = _item(
+        "image-result",
+        {
+            "type": "tool_result",
+            "id": "image",
+            "name": "read_image",
+            "output": [{"type": "text", "text": '"\n截图' * 2_000}, image],
+        },
+        kind="tool_result",
+        policy=policy,
+        token_budget=text_budget,
+        role="assistant",
+        created_seq=2,
+        pair_id="image",
+    )
+
+    assembly = ContextAssembler(total_budget=total_budget).assemble([call, result])
+
+    retained = next(item for item in assembly.included if item.kind == "tool_result")
+    output = thaw_json(retained.content)["output"]
+    assert output[1:] == [image]
+    assert output[0]["type"] == "text"
+    assert output[0]["text"]
+    if action == "pruned" or policy == "head_tail":
+        assert "omitted" in output[0]["text"]
+    record = next(row for row in assembly.manifest["included"] if row["item_id"] == "image-result")
+    assert record["action"] == action
+    assert assembly.excluded == ()

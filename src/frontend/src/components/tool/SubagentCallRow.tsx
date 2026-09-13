@@ -6,7 +6,6 @@ import { useCanvasStore } from '../../stores/canvasStore';
 import type { ToolCall } from '../../types';
 import { subagentStatus } from '../../utils/subagentView';
 import { AgentIcon } from '../agent/AgentIcon';
-import { ElapsedTimer } from '../common';
 import type { ToolMessageIdentity } from './ToolMessageContext';
 
 export function SubagentStatus({ tool, isStreaming }: { tool: ToolCall; isStreaming?: boolean }) {
@@ -43,9 +42,7 @@ export function SubagentCallRow({ tool, isStreaming, identity }: {
         <span className="jx-tcr-status"><SubagentStatus tool={tool} isStreaming={isStreaming} /></span>
         <AgentIcon agent={agent} size={22} />
         <span className="jx-tcr-label"><span className={running ? 'jx-tcr-prefix jx-tcr-prefix--shimmer' : 'jx-tcr-prefix'}>{agent.name}</span></span>
-        {running && tool.timestamp ? <ElapsedTimer startTs={tool.timestamp} className="jx-tcr-timer" /> : null}
-        {!running && tool.durationMs != null ? <span className="jx-tcr-timer">{t('用时 {sec}秒', { sec: (tool.durationMs / 1000).toFixed(1) })}</span> : null}
-        <span className="jx-subagentCall-arrow" aria-hidden="true">›</span>
+        <span className="jx-tcr-arrow" aria-hidden="true" />
       </button>
     </div>
   );

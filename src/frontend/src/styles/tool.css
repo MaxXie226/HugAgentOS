@@ -42,13 +42,13 @@
   user-select: none;
   transition: background 0.15s;
 }
-.jx-tcr-header[role="button"] {
+.jx-tcr-header:is(button, [role="button"]) {
   cursor: pointer;
 }
-.jx-tcr-header[role="button"]:hover {
+.jx-tcr-header:is(button, [role="button"]):hover {
   background: color-mix(in srgb, var(--color-text) 3%, transparent);
 }
-.jx-tcr-header[role="button"]:focus-visible {
+.jx-tcr-header:is(button, [role="button"]):focus-visible {
   outline: 2px solid color-mix(in srgb, var(--color-primary) 30%, transparent);
   outline-offset: 1px;
 }
@@ -78,7 +78,7 @@
   stroke-width: 0;
   transition: color 0.15s ease;
 }
-.jx-tcr-header[role="button"]:hover .jx-tcr-icon--step {
+.jx-tcr-header:is(button, [role="button"]):hover .jx-tcr-icon--step {
   color: color-mix(in srgb, var(--color-text) 60%, transparent);
 }
 /* Fallback marker for tools with no category icon — a small hollow ring */
@@ -162,8 +162,8 @@
 .jx-tcr-arrow--open {
   transform: rotate(90deg);
 }
-.jx-tcr-header[role="button"]:hover .jx-tcr-arrow,
-.jx-tcr-header[role="button"]:focus-visible .jx-tcr-arrow {
+.jx-tcr-header:is(button, [role="button"]):hover .jx-tcr-arrow,
+.jx-tcr-header:is(button, [role="button"]):focus-visible .jx-tcr-arrow {
   opacity: 1;
   border-left-color: color-mix(in srgb, var(--color-text) 55%, transparent);
 }

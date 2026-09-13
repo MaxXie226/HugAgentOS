@@ -51,6 +51,7 @@ from core.llm.providers._fallback import (  # noqa: F401
     L3_SYNTHETIC_METADATA,
     StructuredFallbackMixin,
 )
+from core.llm.providers._image_tokens import ImageTokenCountingMixin
 from core.llm.providers.registry import get_spec, split_provider_extra
 from core.llm.providers.vendor_models import build_litellm_model, build_native_model
 from core.llm.reasoning_replay import ReasoningReplayMixin
@@ -521,7 +522,7 @@ class ReasoningEchoChatFormatter(ReasoningReplayMixin, OpenAIChatFormatter):
         return messages
 
 
-class OpenAICompatChatModel(StructuredFallbackMixin, OpenAIChatModel):
+class OpenAICompatChatModel(ImageTokenCountingMixin, StructuredFallbackMixin, OpenAIChatModel):
     """OpenAIChatModel subclass: injects a custom http_client + extra_body; optional Azure OpenAI client.
 
     Pinned to agentscope==2.0.0: the ``_call_api`` body is copied from the parent class (2.0.0);
