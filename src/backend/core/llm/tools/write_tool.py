@@ -318,6 +318,7 @@ def register_write(
 
         # ── Reverse sync: myspace paths auto-persist; other paths follow register_as_artifact ──
         artifact_ref: Optional[dict] = None
+        from core.artifacts.local_project import is_project_file_path
         if is_persistent and user_id:
             # Folder-aware reverse sync: create the UserFolder chain per
             # /myspace/<folder>/<filename> and set user_folder_id, so the "My Space"
@@ -329,6 +330,19 @@ def register_write(
                 content=new_bytes,
                 scope=scope,
             )
+        elif register_as_artifact and user_id and (
+            is_project_file_path(file_path, scope) or is_project_file_path(physical, scope)
+        ):
+            from core.artifacts.local_project import reference_project_file
+            from fastapi import HTTPException
+
+            try:
+                artifact_ref = reference_project_file(physical, scope=scope, user_id=user_id)
+                artifact_ref = {k: artifact_ref[k] for k in ("file_id", "name", "mime_type", "size")}
+                artifact_ref["url"] = f"/files/{artifact_ref['file_id']}"
+            except (HTTPException, OSError, ValueError) as exc:
+                return resp_json({"error": str(getattr(exc, "detail", exc)), "file_path": file_path,
+                                  "note": "文件已写入，但未交付。请将最终文件保存在当前项目内后再 pin。"})
         elif register_as_artifact and user_id:
             artifact_ref = upsert_myspace_artifact(
                 user_id=user_id,

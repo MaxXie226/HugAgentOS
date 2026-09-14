@@ -10,6 +10,7 @@ import {
 import { normalizeArtifactOutput } from '../utils/fileParser';
 import { stripMcpToolPrefix } from '../utils/constants';
 import { refreshTargetForTool } from '../utils/toolRefresh';
+import { normalizeToolId as normalizeToolIdValue, resolveToolCardIndex } from '../utils/toolMatching';
 import {
   isCompactionCheckpointForRun,
   parseContextCompactionState,
@@ -597,11 +598,7 @@ export async function processChatStream(resp: Response, opts: ChatStreamOptions)
     }
   };
 
-  const normalizeToolId = (value: unknown): string | undefined => {
-    if (typeof value !== 'string') return undefined;
-    const id = value.trim();
-    return id.length > 0 ? id : undefined;
-  };
+  const normalizeToolId = normalizeToolIdValue;
 
   const getEventToolId = (obj: Record<string, unknown>) =>
     normalizeToolId(obj.id) || normalizeToolId(obj.tool_call_id) || normalizeToolId(obj.call_id) || normalizeToolId(obj.tool_id);
@@ -629,34 +626,15 @@ export async function processChatStream(resp: Response, opts: ChatStreamOptions)
     return undefined;
   };
 
-  const findLastRunningToolIndex = (name?: string) => {
-    for (let i = toolCalls.length - 1; i >= 0; i--) {
-      if (toolCalls[i].status !== 'running') continue;
-      if (name && toolCalls[i].name !== name) continue;
-      return i;
-    }
-    return -1;
-  };
-
-  const findToolCallIndex = (obj: Record<string, unknown>) => {
-    const eventToolId = getEventToolId(obj);
-    if (eventToolId) {
-      const directIndex = toolCalls.findIndex((tool) => normalizeToolId(tool.id) === eventToolId);
-      if (directIndex >= 0) return directIndex;
-    }
-    const eventToolName = getEventToolRawName(obj);
-    if (eventToolName) {
-      const byNameIndex = findLastRunningToolIndex(eventToolName);
-      if (byNameIndex >= 0) return byNameIndex;
-    }
-    // Last resort — bind to whatever is still running — only for events that
-    // carry no tool_id at all. An id that matched nothing means the result
-    // belongs to a card we never created (a tool_call event we never got); with
-    // tools running in parallel, grabbing an unrelated running card would file
-    // this output under the wrong tool and hide the real call entirely.
-    if (eventToolId) return -1;
-    return findLastRunningToolIndex();
-  };
+  // Identity is the call id; see utils/toolMatching. An id that matched nothing
+  // means the result belongs to a card we never created (a tool_call event we
+  // never got), and the name is not an identity — with tools running in
+  // parallel it names several cards at once, so falling back to it would file
+  // this output under the wrong tool and hide the real call entirely.
+  const findToolCallIndex = (obj: Record<string, unknown>) =>
+    resolveToolCardIndex(toolCalls, getEventToolId(obj), getEventToolRawName(obj), {
+      fallbackToAnyRunning: true,
+    });
 
   const finalizeRunningTools = (status: 'success' | 'error' = 'success') => {
     let changed = false;
@@ -1265,12 +1243,8 @@ export async function processChatStream(resp: Response, opts: ChatStreamOptions)
           revision.toolPending = false;
           const eventToolId = getEventToolId(eventObj);
           const toolName = getEventToolRawName(eventObj);
-          let index = eventToolId
-            ? revision.toolCalls.findIndex((tool) => normalizeToolId(tool.id) === eventToolId)
-            : -1;
-          if (index < 0 && toolName) {
-            index = revision.toolCalls.findIndex((tool) => tool.name === toolName && tool.status === 'running');
-          }
+          // 同上：带 id 就只认 id，认不到就往下走「新建一张卡」，不按名字抢别人的。
+          const index = resolveToolCardIndex(revision.toolCalls, eventToolId, toolName);
           const output = eventObj.output ?? eventObj.result;
           if (index >= 0) {
             revision.toolCalls[index] = {

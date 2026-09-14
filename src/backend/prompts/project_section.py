@@ -10,6 +10,10 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+# The prompt lists at most PROJECT_FILE_LIST_CAP files; it lives in the stdlib-only
+# config module so the chat context can be trimmed to that size without importing
+# the prompt runtime.
+from prompts.prompt_config import PROJECT_FILE_LIST_CAP
 from prompts.prompt_runtime import _load_db_prompt_parts  # noqa: E402 (cycle-safe)
 
 
@@ -24,10 +28,6 @@ def _format_size(n: int) -> str:
         return f"{n/1024/1024:.1f} MB"
     return f"{n/1024/1024/1024:.1f} GB"
 
-
-# Hard cap on the file listing in the project-mode prompt: beyond it only the first
-# N are listed, with a hint to query the rest via tools
-_PROJECT_FILE_LIST_CAP = 50
 
 # part_id of the project-mode section in AdminPromptPart. Editable/versionable in
 # the Config console; falls back to _PROJECT_MODE_DEFAULT_TEMPLATE below when
@@ -56,9 +56,9 @@ def _render_file_list_block(files: list, total: int) -> str:
     """Markdown section for the file listing (heading + entries + truncation notice + hint). Returns '' for an empty list."""
     if total <= 0:
         return ""
-    shown = min(total, _PROJECT_FILE_LIST_CAP)
+    shown = min(total, PROJECT_FILE_LIST_CAP)
     lines: list[str] = [f"### 项目沙盒文件清单（共 {total} 个，列出前 {shown}）"]
-    for item in files[:_PROJECT_FILE_LIST_CAP]:
+    for item in files[:PROJECT_FILE_LIST_CAP]:
         rel = (item.get("name") or "").strip()  # the name returned by the service already includes the subpath
         if not rel:
             continue
@@ -66,9 +66,9 @@ def _render_file_list_block(files: list, total: int) -> str:
         size = _format_size(item.get("size_bytes") or 0)
         meta = f"{mime}, {size}" if mime else size
         lines.append(f"- {rel} ({meta})")
-    if total > _PROJECT_FILE_LIST_CAP:
+    if total > PROJECT_FILE_LIST_CAP:
         lines.append(
-            f"...还有 {total - _PROJECT_FILE_LIST_CAP} 个未列出，"
+            f"...还有 {total - PROJECT_FILE_LIST_CAP} 个未列出，"
             "用 list_myspace_files 工具查看完整列表。"
         )
     lines.append(
@@ -147,6 +147,7 @@ def _build_project_section(
     folder_name: str,
     folder_kind: str,
     project_files: list | None = None,
+    project_file_count: int | None = None,
 ) -> str:
     """Build the "project mode" system-prompt section.
 
@@ -166,7 +167,7 @@ def _build_project_section(
 
     name = (project_name or "").strip() or "(未命名项目)"
     files = list(project_files or [])
-    total = len(files)
+    total = len(files) if project_file_count is None else int(project_file_count)
     scope_text = "我的空间" if folder_kind == "personal" else "团队空间"
 
     vars_ = {
@@ -213,6 +214,9 @@ def _build_local_project_section(
         "",
         "**在这个真实文件夹里新建、修改、删除、运行文件即可，产物实时出现在用户电脑上——"
         "不需要、也不要引导用户上传到「我的空间」。**",
+        "需要向用户展示项目文件时，直接调用 pin_to_workspace(file_paths=[真实文件路径或项目相对路径])。"
+        "pin 只展示原文件，不复制、不上传；不要为交付另存到 artifacts。"
+        "sandbox_get_artifact 登记项目文件也只返回原文件引用；临时沙盒文件仍需导出。",
         "建站必须先在本地项目真实目录下的 sites/<站点名>/ 编写源码，"
         "不要把最终源码留在 /workspace/site 或 /workspace/site-src。"
         "编辑已有站点先读取当前站点的 source_dir 并原地修改；"

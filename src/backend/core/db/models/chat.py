@@ -28,7 +28,7 @@ from sqlalchemy import (
     update,
 )
 from sqlalchemy.dialects.postgresql import INET, JSONB
-from sqlalchemy.orm import mapped_column, relationship
+from sqlalchemy.orm import deferred, mapped_column, relationship
 
 JSONType = JSON().with_variant(JSONB(), "postgresql")
 INETType = String(45).with_variant(INET(), "postgresql")
@@ -329,7 +329,9 @@ class ChatRun(Base):
     lease_expires_at = Column(TIMESTAMP(timezone=True))
     operation_seq = Column(Integer, nullable=False, default=0)
     snapshot_version = Column(Integer, nullable=False, default=0)
-    recovery_snapshot = Column(JSONType)
+    # Holds the whole in-flight run payload (megabytes on long chats); loading it
+    # with every ChatRun row decodes that JSON again, so it is fetched on access.
+    recovery_snapshot = deferred(Column(JSONType))
     last_operation_safety = Column(String(40), nullable=False, default="replayable")
     failure_reason = Column(Text)
     updated_at = Column(

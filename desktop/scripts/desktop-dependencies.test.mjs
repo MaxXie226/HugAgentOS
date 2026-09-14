@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   DESKTOP_TARGETS,
+  DESKTOP_RUNTIME_INPUT_FILES,
   DESKTOP_REQUIREMENTS_FILE,
   WINDOWS_DESKTOP_LOCK_FILE,
   desktopDependencyFingerprint,
@@ -106,7 +107,8 @@ test("desktop dependency hash is independent of checkout line endings", () => {
   const fixture = mkdtempSync(join(tmpdir(), "desktop-dependencies-"));
   try {
     mkdirSync(join(fixture, "desktop"), { recursive: true });
-    for (const file of [DESKTOP_REQUIREMENTS_FILE, WINDOWS_DESKTOP_LOCK_FILE]) {
+    for (const file of [DESKTOP_REQUIREMENTS_FILE, WINDOWS_DESKTOP_LOCK_FILE, ...DESKTOP_RUNTIME_INPUT_FILES]) {
+      mkdirSync(dirname(join(fixture, file)), { recursive: true });
       const contents = readFileSync(join(repoRoot, file), "utf8");
       writeFileSync(join(fixture, file), contents.replaceAll("\n", "\r\n"));
     }
@@ -131,4 +133,36 @@ test("all supported desktop targets have exact Python 3.11 locks", () => {
       }
     }
   }
+});
+
+
+test("changing native tools invalidates a cached desktop runtime", () => {
+  const fixture = mkdtempSync(join(tmpdir(), "desktop-native-fingerprint-"));
+  try {
+    mkdirSync(join(fixture, "desktop"), { recursive: true });
+    for (const file of [DESKTOP_REQUIREMENTS_FILE, WINDOWS_DESKTOP_LOCK_FILE, ...DESKTOP_RUNTIME_INPUT_FILES]) {
+      mkdirSync(dirname(join(fixture, file)), { recursive: true });
+      writeFileSync(join(fixture, file), readFileSync(join(repoRoot, file)));
+    }
+    const tools = join(fixture, "desktop/native-tools.json");
+    writeFileSync(tools, JSON.stringify({officecli:{version:"1.0.143"}}));
+    const before = desktopDependencyFingerprint(fixture, "windows-x86_64");
+    writeFileSync(tools, JSON.stringify({officecli:{version:"1.0.144"}}));
+    assert.notEqual(desktopDependencyFingerprint(fixture, "windows-x86_64"), before);
+  } finally { rmSync(fixture, { recursive: true, force: true }); }
+});
+
+
+test("changing the runtime smoke check invalidates the cached bundle", () => {
+  const fixture = mkdtempSync(join(tmpdir(), "desktop-recipe-fingerprint-"));
+  try {
+    for (const file of [DESKTOP_REQUIREMENTS_FILE, WINDOWS_DESKTOP_LOCK_FILE, ...DESKTOP_RUNTIME_INPUT_FILES]) {
+      mkdirSync(dirname(join(fixture, file)), { recursive: true });
+      writeFileSync(join(fixture, file), readFileSync(join(repoRoot, file)));
+    }
+    const before = desktopDependencyFingerprint(fixture, "windows-x86_64");
+    const smoke = join(fixture, "desktop/scripts/runtime-smoke.py");
+    writeFileSync(smoke, readFileSync(smoke, "utf8") + "\n# updated verification recipe\n");
+    assert.notEqual(desktopDependencyFingerprint(fixture, "windows-x86_64"), before);
+  } finally { rmSync(fixture, { recursive: true, force: true }); }
 });

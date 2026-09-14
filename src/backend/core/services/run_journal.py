@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping, Optional
 
 from sqlalchemy import func, or_
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session, sessionmaker, undefer
 
 from core.db.engine import SessionLocal
 from core.db.models import ChatRun, ChatRunOperation, ChatSession
@@ -357,7 +357,7 @@ class RunJournal:
             db.commit()
             return bool(affected)
 
-    def _holds_lease(self, row: ChatRun, owner: str) -> bool:
+    def _holds_lease(self, row: Any, owner: str) -> bool:
         expires = _aware(row.lease_expires_at)
         now = _aware(self._clock())
         return not (
@@ -368,13 +368,13 @@ class RunJournal:
             or expires <= now
         )
 
-    def _locked_owned_run(self, db: Session, run_id: str, owner: str) -> ChatRun:
-        row = (
-            db.query(ChatRun)
-            .filter(ChatRun.run_id == run_id)
-            .with_for_update()
-            .one_or_none()
-        )
+    def _locked_owned_run(
+        self, db: Session, run_id: str, owner: str, *, with_snapshot: bool = False
+    ) -> ChatRun:
+        query = db.query(ChatRun).filter(ChatRun.run_id == run_id)
+        if with_snapshot:
+            query = query.options(undefer(ChatRun.recovery_snapshot))
+        row = query.with_for_update().one_or_none()
         if row is None:
             raise RunNotFound(run_id)
         if not self._holds_lease(row, owner):
@@ -390,7 +390,11 @@ class RunJournal:
         run journal is SQLite, and the person is watching the answer appear.
         """
         with self._sessions() as db:
-            row = db.query(ChatRun).filter(ChatRun.run_id == run_id).one_or_none()
+            row = (
+                db.query(ChatRun.status, ChatRun.lease_owner, ChatRun.lease_expires_at)
+                .filter(ChatRun.run_id == run_id)
+                .one_or_none()
+            )
             if row is None:
                 raise RunNotFound(run_id)
             if not self._holds_lease(row, owner):
@@ -474,7 +478,7 @@ class RunJournal:
     ) -> JournalReceipt:
         now = self._clock()
         with self._sessions() as db:
-            row = self._locked_owned_run(db, run_id, owner)
+            row = self._locked_owned_run(db, run_id, owner, with_snapshot=True)
             version = int(row.snapshot_version or 0) + 1
             merged = dict(row.recovery_snapshot or {})
             merged.update(dict(snapshot or {}))
@@ -730,6 +734,7 @@ class RunJournal:
         with self._sessions() as db:
             rows = (
                 db.query(ChatRun)
+                .options(undefer(ChatRun.recovery_snapshot))
                 .filter(
                     ChatRun.status.in_(LIVE_STATUSES),
                     or_(

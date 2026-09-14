@@ -5,7 +5,7 @@ inside the function; ``core.llm.tool`` re-exports ``register_pin_to_workspace``.
 """
 
 import logging
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 from agentscope.message import TextBlock
 from agentscope.tool import Toolkit
@@ -18,6 +18,7 @@ def register_pin_to_workspace(
     toolkit: Toolkit,
     *,
     scope: Optional["ProjectScope"] = None,  # type: ignore[name-defined]
+    sandbox_session_id: Optional[str] = None,
 ) -> None:
     """Register the ``pin_to_workspace`` tool.
 
@@ -37,7 +38,7 @@ def register_pin_to_workspace(
     """
     from core.services.project_scope import ProjectScope  # noqa: F401 - re-import for closure
 
-    async def pin_to_workspace(file_ids: list[str]) -> ToolResponse:
+    async def pin_to_workspace(file_ids: list[str] = [], file_paths: list[str] = []) -> ToolResponse:
         """把文件交付到对话区——**唯一**让用户看到文件的方式。
 
         凡用户要求生成/导出文件（文档、图片、PPT、Excel、PDF、CSV、压缩包、音视频、
@@ -48,7 +49,9 @@ def register_pin_to_workspace(
         不要分多次；单个也传列表。中间稿（编辑链里的临时文件、调试草图）不要 pin。
         重复调用会累加、已 pin 的自动去重，个别 ID 失败不影响其余文件交付。
 
-        **只传 ID，不要传路径或文件名**（含 ``/`` 或 ``.docx`` 就是错的）。ID 来源：
+        **本机项目**：直接用 ``file_paths=["项目内相对路径或绝对路径"]`` 展示已生成的原文件，
+        不复制、不上传到 artifacts。重复交付同一文件保持同一引用。不要为 pin 复制文件。
+        其他模式用 ``file_ids``，不要把路径放进 ID 列表。ID 来源：
         沙盒文件先 ``sandbox_get_artifact`` 登记；``generate_chart_tool`` 与
         word/ppt/excel/pdf-cli 直接返回；我的空间文件用 ``list_myspace_files``。
 
@@ -56,6 +59,8 @@ def register_pin_to_workspace(
             file_ids (`List[str]`):
                 artifact 文件 ID 列表，取自前面工具返回的 ``file_id``，或用户上传
                 文件的 ``ua_*`` ID。只 pin 一个也要传列表（``["fid_xxx"]``）。
+
+            file_paths (`List[str]`): 本机项目已有文件的路径列表。仅本机项目可用，与 file_ids 可同时传入。
 
         Returns:
             JSON: ``{ok, pinned: [{file_id, name, already_pinned}], failed: [{file_id, error}], pinned_count}``。
@@ -87,7 +92,7 @@ def register_pin_to_workspace(
                 ),
             )])
 
-        if not raw_ids:
+        if not raw_ids and not file_paths:
             return ToolResponse(content=[TextBlock(
                 type="text",
                 text=_json.dumps(
@@ -99,6 +104,26 @@ def register_pin_to_workspace(
         pinned_results: list[Dict[str, Any]] = []
         failed_results: list[Dict[str, Any]] = []
         to_persist: list[Dict[str, Any]] = []
+
+        if file_paths:
+            from core.artifacts.local_project import reference_project_file
+            from core.infra.logging import user_id_var
+            from fastapi import HTTPException
+
+            if not isinstance(file_paths, list):
+                file_paths = [file_paths]
+            for path in file_paths:
+                if not isinstance(path, str) or not path.strip():
+                    failed_results.append({"path": str(path), "error": "文件路径必须是非空字符串"})
+                    continue
+                try:
+                    from core.artifacts.local_project import project_file_path
+                    from core.infra.logging import chat_id_var
+                    physical = project_file_path(path, scope, user_id_var.get(), sandbox_session_id or chat_id_var.get())
+                    item = reference_project_file(physical, scope=scope, user_id=user_id_var.get() or "")
+                    raw_ids = [*raw_ids, item["file_id"]]
+                except (HTTPException, OSError, ValueError) as exc:
+                    failed_results.append({"path": path, "error": str(getattr(exc, "detail", exc))})
 
         for raw in raw_ids:
             fid = str(raw or "").strip() if isinstance(raw, str) else ""
@@ -115,6 +140,12 @@ def register_pin_to_workspace(
             if not item:
                 failed_results.append({"file_id": fid, "error": f"artifact {fid} 不存在或无权访问"})
                 continue
+
+            if (item.get("metadata") or {}).get("source") == "local_project_reference":
+                from core.infra.logging import user_id_var
+                if item["metadata"].get("user_id") != user_id_var.get():
+                    failed_results.append({"file_id": fid, "error": "无权访问本机项目文件"})
+                    continue
 
             added = _workspace.pin(
                 file_id=fid,
@@ -175,7 +206,24 @@ def register_pin_to_workspace(
             text=_json.dumps(result, ensure_ascii=False),
         )])
 
-    toolkit.register_tool_function(pin_to_workspace, namesake_strategy="override")
+    from core.llm.tool_permissions import ToolPermissionSpec, local_path_tool, READ
+
+    def resolve_pin_paths(args, runtime):
+        from core.artifacts.local_project import project_file_path
+        paths = args.get("file_paths") or []
+        if isinstance(paths, str):
+            paths = [paths]
+        intents = []
+        for path in paths:
+            if isinstance(path, str) and path.strip():
+                physical = project_file_path(path, scope, runtime.user_id,
+                    sandbox_session_id or runtime.sandbox_session_id or runtime.chat_id)
+                intents.extend(local_path_tool("path", READ, tool_name="pin_to_workspace").resolver(
+                    {"path": physical}, runtime))
+        return intents
+
+    toolkit.register_tool_function(pin_to_workspace, namesake_strategy="override",
+        permission=ToolPermissionSpec("local-project-pin-paths", resolve_pin_paths))
     logger.info("[factory] Registered pin_to_workspace tool")
 
 

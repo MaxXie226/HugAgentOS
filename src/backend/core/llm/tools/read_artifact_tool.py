@@ -32,13 +32,13 @@ def _is_pptx_meta(meta: dict) -> bool:
     return "presentationml.presentation" in mime or name.endswith(".pptx")
 
 
-def _probe_xlsx_sheet_names(file_id: str, filename: str) -> tuple[list[str], bytes | None]:
+def _probe_xlsx_sheet_names(file_id: str, filename: str, user_id: Optional[str] = None) -> tuple[list[str], bytes | None]:
     """Cheaply list sheet names and return the bytes for reuse. Returns
     ``([], None)`` on download failure, ``(names, bytes)`` on success."""
     from core.content.file_parser import parse_xlsx_sheet_names
     from core.llm.hooks import _download_artifact_bytes
 
-    file_bytes = _download_artifact_bytes(file_id, filename, "read_artifact xlsx")
+    file_bytes = _download_artifact_bytes(file_id, filename, "read_artifact xlsx", user_id=user_id)
     if file_bytes is None:
         return [], None
     try:
@@ -70,13 +70,13 @@ async def _resolve_xlsx_text(
     )
 
 
-def _probe_pptx_slide_count(file_id: str, filename: str) -> tuple[int, bytes | None]:
+def _probe_pptx_slide_count(file_id: str, filename: str, user_id: Optional[str] = None) -> tuple[int, bytes | None]:
     """Cheaply count slides and return the bytes for reuse. Returns
     ``(0, None)`` on download failure, ``(count, bytes)`` on success."""
     from core.content.file_parser import parse_pptx_slide_count
     from core.llm.hooks import _download_artifact_bytes
 
-    file_bytes = _download_artifact_bytes(file_id, filename, "read_artifact pptx")
+    file_bytes = _download_artifact_bytes(file_id, filename, "read_artifact pptx", user_id=user_id)
     if file_bytes is None:
         return 0, None
     try:
@@ -203,7 +203,7 @@ def register_read_artifact(toolkit: Toolkit, user_id: Optional[str] = None) -> N
                 if slide_index is not None:
                     raise RuntimeError("slide_index 仅对 pptx 文件有效")
                 sheet_names, file_bytes = await asyncio.to_thread(
-                    _probe_xlsx_sheet_names, fid, meta.get("filename") or "file.xlsx"
+                    _probe_xlsx_sheet_names, fid, meta.get("filename") or "file.xlsx", user_id
                 )
                 extras["sheet_names"] = sheet_names
                 text = await _resolve_xlsx_text(fid, sheet_name, user_id, file_bytes)
@@ -211,7 +211,7 @@ def register_read_artifact(toolkit: Toolkit, user_id: Optional[str] = None) -> N
                 if sheet_name is not None:
                     raise RuntimeError("sheet_name 仅对 xlsx 文件有效")
                 slide_count, file_bytes = await asyncio.to_thread(
-                    _probe_pptx_slide_count, fid, meta.get("filename") or "file.pptx"
+                    _probe_pptx_slide_count, fid, meta.get("filename") or "file.pptx", user_id
                 )
                 extras["slide_count"] = slide_count
                 if slide_index is not None:

@@ -6,20 +6,21 @@ The desktop client's (`desktop/`, Tauri v2) "one-click update" chain:
                                → if newer → GET /v1/desktop/download/{file}  # download installer
                                → local signature verification (pubkey) → install → restart
 
-**Both endpoints must be public (no auth)**: the Tauri updater sends requests without a
+**These distribution endpoints must be public (no auth)**: the Tauri updater sends requests without a
 session cookie. They only read static artifacts from the release directory, touch no user
 data, and are safe to expose.
 
 The release directory is set by the env var `DESKTOP_RELEASE_DIR` (default
 `/app/desktop_release`). The release process (after `npm run build` on the Rust-equipped
-Windows build machine) just puts three things into that directory:
+Windows build machine) uses desktop/scripts/publish-desktop.py to publish artifacts and release-index.json.
+The index is authoritative once present; latest.json remains a legacy compatibility mirror:
 
     <DESKTOP_RELEASE_DIR>/
       ├─ latest.json                              # update manifest (format below)
       ├─ HugAgentOS_0.2.0_x64-setup.nsis.zip        # NSIS installer (updater artifact)
       └─ HugAgentOS_0.2.0_x64-setup.nsis.zip.sig    # matching signature (optional; the signature content can also be inlined into latest.json)
 
-`latest.json` uses the Tauri v2 "dynamic manifest" format; `platforms.*.url` may be a **bare
+`latest.json` uses the Tauri v2 static manifest format; `platforms.*.url` may be a **bare
 filename** — this endpoint rewrites it into an absolute download URL based on the request
 origin, decoupling it from the backend's actual domain/port (one latest.json works across
 all environments):
@@ -37,14 +38,16 @@ all environments):
     }
 """
 
+import asyncio
 import json
 import os
 from pathlib import Path
 from typing import Any, Dict
 
 from fastapi import APIRouter, Request
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 
+from core.services.desktop_release_events import ReleaseEvents
 from core.infra.logging import get_logger
 
 logger = get_logger(__name__)
@@ -75,21 +78,40 @@ def _download_base(request: Request) -> str:
 
 @router.get("/latest.json", summary="桌面客户端更新清单（公开，供 Tauri updater 拉取）")
 async def latest_manifest(request: Request) -> Response:
-    """返回 Tauri v2 动态更新清单。
+    """返回 Tauri v2 更新清单；带 target/arch 时选择该平台的最新可用版本。
 
     - 发布目录/清单不存在 → 204（updater 视为「无可用更新」，静默不打扰）。
     - `platforms.*.url` 若是裸文件名/相对路径，改写为本机 download 接口的绝对地址。
     """
-    manifest_path = _release_dir() / "latest.json"
+    index_path = _release_dir() / "release-index.json"
+    manifest_path = index_path if index_path.is_file() else _release_dir() / "latest.json"
     if not manifest_path.is_file():
         # No release configured → explicitly tell the updater "no update".
-        return Response(status_code=204)
+        return Response(status_code=204, headers={"Cache-Control": "no-store"})
 
     try:
         manifest: Dict[str, Any] = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as exc:
         logger.warning("[desktop] latest.json 解析失败: %s", exc)
-        return Response(status_code=204)
+        return Response(status_code=204, headers={"Cache-Control": "no-store"})
+
+    if manifest_path == index_path:
+        target = request.query_params.get("target")
+        arch = request.query_params.get("arch")
+        manifest = (manifest.get("latest", {}).get(f"{target}-{arch}")
+                    if target is not None or arch is not None else manifest.get("legacy"))
+        if not isinstance(manifest, dict):
+            return Response(status_code=204, headers={"Cache-Control": "no-store"})
+
+    # Older clients omit these parameters and require the complete common release.
+    target = request.query_params.get("target")
+    arch = request.query_params.get("arch")
+    if target is not None or arch is not None:
+        platform = f"{target}-{arch}"
+        spec = (manifest.get("platforms") or {}).get(platform)
+        if not isinstance(spec, dict):
+            return Response(status_code=204, headers={"Cache-Control": "no-store"})
+        manifest["platforms"] = {platform: spec}
 
     base = _download_base(request)
     platforms = manifest.get("platforms")
@@ -111,7 +133,31 @@ async def latest_manifest(request: Request) -> Response:
                     except OSError:
                         pass
 
-    return JSONResponse(content=manifest)
+    return JSONResponse(content=manifest, headers={"Cache-Control": "no-store"})
+
+
+@router.get("/events", summary="桌面版本发布通知（公开，仅通知清单变化）")
+async def release_events(request: Request) -> StreamingResponse:
+    # Application state keeps one observer per worker, not one polling loop per client.
+    observer = getattr(request.app.state, "desktop_release_events", None)
+    if observer is None:
+        observer = ReleaseEvents(_release_dir())
+        request.app.state.desktop_release_events = observer
+
+    async def stream():
+        async with observer.subscribe() as queue:
+            while True:
+                try:
+                    revision = await asyncio.wait_for(queue.get(), timeout=15)
+                    yield "event: release\ndata: " + json.dumps({"revision": revision}) + "\n\n"
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+
+    return StreamingResponse(stream(), media_type="text/event-stream", headers={
+        "Cache-Control": "no-store, no-transform",
+        "X-Accel-Buffering": "no",
+        "Content-Encoding": "identity",
+    })
 
 
 @router.get("/download/{filename}", summary="桌面安装包下载（公开）")

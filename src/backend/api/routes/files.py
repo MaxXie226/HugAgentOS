@@ -77,6 +77,9 @@ def local_file_location(
     _authorize_access(
         item=item, file_id=file_id, user=user, db=db, denied_action="file.open.denied"
     )
+    if (item.get("metadata") or {}).get("source") == "local_project_reference":
+        path = Path(item["path"])
+        return {"path": str(path), "folder_path": str(path.parent)}
     storage = get_storage()
     if not isinstance(storage, LocalStorageBackend):
         raise HTTPException(status_code=409, detail="文件不在本机存储中")
@@ -129,6 +132,8 @@ def _authorize_access(
 ) -> None:
     metadata = item.get("metadata") or {}
     if not user:
+        if metadata.get("source") == "local_project_reference":
+            raise HTTPException(status_code=401, detail="请先登录")
         return
     if can_access_artifact_metadata(db, str(user.user_id), metadata):
         return

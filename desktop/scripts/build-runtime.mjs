@@ -100,6 +100,19 @@ export function buildDesktopRuntime({ desktopDir, repoRoot, sourceRoot, python }
   }
   run("uv", ["pip", "check", "--python", executable], { cwd: repoRoot });
 
+  run(python.command, [
+    ...python.prefix,
+    join(desktopDir, "scripts", "install-native-tools.py"),
+    "--manifest", join(desktopDir, "native-tools.json"),
+    "--target", target,
+    "--runtime", runtimeRoot,
+    "--executable", config.executable,
+  ], { cwd: repoRoot });
+  mkdirSync(join(runtimeRoot, "licenses"), { recursive: true });
+  copyFileSync(join(desktopDir, "licenses", "OfficeCLI-LICENSE.txt"),
+    join(runtimeRoot, "licenses", "OfficeCLI-LICENSE.txt"));
+  const nativeTools = readJson(join(runtimeRoot, "native-tools.json"));
+
   const smokeTest = join(runtimeRoot, "runtime-smoke.py");
   copyFileSync(join(desktopDir, "scripts", "runtime-smoke.py"), smokeTest);
   const pythonVersion = capture(executable, ["-c", "import platform; print(platform.python_version())"]);
@@ -110,6 +123,7 @@ export function buildDesktopRuntime({ desktopDir, repoRoot, sourceRoot, python }
     dependency_fingerprint: dependencyFingerprint,
     executable: config.executable,
     smoke_test: "runtime-smoke.py",
+    native_tools: nativeTools,
   };
   writeFileSync(
     join(runtimeRoot, "runtime-layout.json"),

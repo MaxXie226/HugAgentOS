@@ -55,7 +55,7 @@ class ProjectSourceService:
         self, project_id: str, actor: str, *, lock: bool = False
     ) -> list[tuple[str, bytes]]:
         project = self.authorized_project(project_id, actor, write=False)
-        entries = ProjectFileService(self.db).list_files(project)
+        entries = ProjectFileService(self.db).list_files(project).items
         if len(entries) > 400:
             raise HTTPException(413, "项目源码文件过多，无法一次载入")
         result, size = [], 0

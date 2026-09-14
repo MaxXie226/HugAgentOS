@@ -134,6 +134,7 @@ export default function ModelEffortChip() {
         aria-haspopup="menu"
         aria-expanded={open}
         title={t('切换模型与思考强度')}
+        aria-label={t('切换模型与思考强度')}
       >
         <span className="jx-composerChip-label">{triggerLabel}</span>
         {triggerAside && <span className="jx-modelEffortAside">{triggerAside}</span>}

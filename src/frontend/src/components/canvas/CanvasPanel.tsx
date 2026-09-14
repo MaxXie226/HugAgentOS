@@ -287,33 +287,63 @@ function MarkdownRenderer({ url, maxBytes }: { url: string; maxBytes: number }) 
   );
 }
 
-function HtmlRenderer({ url, version }: { url: string; version: string | number }) {
-  // sandbox="allow-scripts" without allow-same-origin: iframe runs as a null
-  // origin, so inline JS cannot read parent cookies / localStorage or call our
-  // /api with the user's session. Subresources (img/script/link src) still
-  // load via plain GET.
-  //
-  // ``inline=1`` flips Content-Disposition from "attachment" → "inline" on
-  // /api/files/<id>; without it the browser treats the response as a download
-  // and the iframe stays blank. Same workaround as PdfRenderer.
-  //
-  // ``v={version}`` is a cache-buster: when an in-place Edit updates an
-  // artifact (same file_id, new content), the URL alone wouldn't change and
-  // the browser would serve the cached bytes. We tie ``version`` to (openSeq
-  // + artifact.size) so any re-open or in-place size change yields a fresh
-  // URL → forces a network fetch. The ``key`` prop on the iframe element
-  // additionally forces React to fully remount the iframe so the new src
-  // takes effect even when the parent component doesn't unmount.
+function HtmlRenderer(props: { url: string; version: string | number; maxBytes: number }) {
+  // Cross-origin iframe navigation does not require CORS. Preserve support for
+  // external artifact links; only our file API can provide readable HTTP errors.
+  if (new URL(props.url, window.location.href).origin !== window.location.origin) {
+    return <div className="jx-canvas-html"><iframe
+      key={`${props.url}-${props.version}`}
+      src={withUrlParams(props.url, { inline: '1', v: String(props.version) })}
+      title="HTML Preview" sandbox="allow-scripts" className="jx-canvas-html-frame" />
+    </div>;
+  }
+  return <FetchedHtmlRenderer {...props} />;
+}
+
+function FetchedHtmlRenderer({ url, version, maxBytes }: { url: string; version: string | number; maxBytes: number }) {
   const inlineUrl = withUrlParams(url, { inline: '1', v: String(version) });
+  const [result, setResult] = useState<{ url: string; html?: string; error?: string }>();
+  useEffect(() => {
+    const controller = new AbortController();
+    (async () => {
+      try {
+        const response = await authFetch(inlineUrl, { signal: controller.signal });
+        if (!response.ok) {
+          const message = response.status === 401 ? t('请先登录后重试预览')
+            : response.status === 403 ? t('没有权限预览此文件')
+            : response.status === 404 ? t('文件已移动或删除')
+            : `${t('预览加载失败')} (HTTP ${response.status})`;
+          throw new Error(message);
+        }
+        const content = await readLimitedText(response, maxBytes);
+        if (controller.signal.aborted) return;
+        // srcDoc keeps API error documents out of the frame and treats the
+        // fetched text as UTF-8. Retain relative resource resolution from the
+        // original file URL. Scripts only run inside the opaque sandbox.
+        const sourceUrl = new URL(response.url || inlineUrl, window.location.href).href;
+        const document = new DOMParser().parseFromString(content, 'text/html');
+        const existingBase = document.head.querySelector('base[href]');
+        const base = existingBase ?? document.createElement('base');
+        base.setAttribute('href', new URL(existingBase?.getAttribute('href') || sourceUrl, sourceUrl).href);
+        if (!existingBase) document.head.prepend(base);
+        const doctype = document.doctype ? new XMLSerializer().serializeToString(document.doctype) : '';
+        setResult({ url: inlineUrl, html: doctype + document.documentElement.outerHTML });
+      } catch (error: unknown) {
+        if (!controller.signal.aborted) setResult({ url: inlineUrl,
+          error: error instanceof PreviewFileTooLargeError
+            ? previewErrorMessage(error, t('预览加载失败'))
+            : error instanceof Error ? error.message : t('预览加载失败'),
+        });
+      }
+    })();
+    return () => controller.abort();
+  }, [inlineUrl, maxBytes]);
+  if (result?.url !== inlineUrl) return <div className="jx-canvas-loading" aria-busy="true"><div className="jx-canvas-spinner" /><span>{t('正在加载…')}</span></div>;
+  if (result.error) return <div className="jx-canvas-error" role="alert">{result.error}</div>;
   return (
     <div className="jx-canvas-html">
-      <iframe
-        key={String(version)}
-        src={inlineUrl}
-        title="HTML Preview"
-        sandbox="allow-scripts"
-        className="jx-canvas-html-frame"
-      />
+      <iframe key={inlineUrl} srcDoc={result.html} title="HTML Preview"
+        sandbox="allow-scripts" className="jx-canvas-html-frame" />
     </div>
   );
 }
@@ -364,6 +394,12 @@ export function CanvasPanel() {
   // can't swallow mousemove events mid-drag.
   const [dragging, setDragging] = useState(false);
   const panelRef = useRef<HTMLDivElement>(null);
+  const dragCleanupRef = useRef<(() => void) | null>(null);
+  useEffect(() => () => dragCleanupRef.current?.(), []);
+  const resizeWidth = useCallback((width: number) => {
+    const available = panelRef.current?.closest('.jx-appMainLayout')?.clientWidth ?? window.innerWidth;
+    setPanelWidth(Math.max(400, Math.min(width, available - 420)));
+  }, [setPanelWidth]);
 
   // xlsx-specific state
   const [xlsxDirty, setXlsxDirty] = useState(false);
@@ -409,8 +445,7 @@ export function CanvasPanel() {
 
     const onMove = (ev: MouseEvent) => {
       const delta = startX - ev.clientX; // dragging left = wider
-      const newWidth = Math.max(400, Math.min(startWidth + delta, window.innerWidth * 0.85));
-      setPanelWidth(newWidth);
+      resizeWidth(startWidth + delta);
     };
     const onUp = () => {
       document.removeEventListener('mousemove', onMove);
@@ -418,13 +453,16 @@ export function CanvasPanel() {
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
       setDragging(false);
+      dragCleanupRef.current = null;
     };
+    dragCleanupRef.current?.();
+    dragCleanupRef.current = onUp;
     document.body.style.cursor = 'col-resize';
     document.body.style.userSelect = 'none';
     setDragging(true);
     document.addEventListener('mousemove', onMove);
     document.addEventListener('mouseup', onUp);
-  }, [setPanelWidth]);
+  }, [resizeWidth]);
 
   if (!isOpen || activeView !== 'file' || !artifact) return null;
 
@@ -519,7 +557,7 @@ export function CanvasPanel() {
       case 'image': return <ImageRenderer url={fileUrl} name={artifact.name} />;
       case 'text': return <TextRenderer url={fileUrl} maxBytes={maxPreviewBytes} />;
       case 'markdown': return <MarkdownRenderer url={fileUrl} maxBytes={maxPreviewBytes} />;
-      case 'html': return <HtmlRenderer url={fileUrl} version={`${openSeq}-${artifact.size ?? 0}`} />;
+      case 'html': return <HtmlRenderer url={fileUrl} version={`${openSeq}-${artifact.size ?? 0}`} maxBytes={maxPreviewBytes} />;
       default: return <UnknownRenderer name={artifact.name} />;
     }
   };
@@ -528,10 +566,21 @@ export function CanvasPanel() {
     <div
       ref={panelRef}
       className={`jx-canvas jx-canvas--${category}${dragging ? ' jx-canvas--dragging' : ''}`}
-      style={panelWidth ? { width: panelWidth } : undefined}
     >
       {/* Drag handle */}
-      <div className="jx-canvas-dragHandle" onMouseDown={handleDragStart} />
+      <div
+        className="jx-canvas-dragHandle"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label={t('右侧面板')}
+        tabIndex={0}
+        onMouseDown={handleDragStart}
+        onKeyDown={(event) => {
+          if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+          event.preventDefault();
+          resizeWidth((panelRef.current?.clientWidth || panelWidth || 700) + (event.key === 'ArrowLeft' ? 32 : -32));
+        }}
+      />
       {/* 拖拽期间的全屏透明遮罩：防 iframe 吞 mousemove */}
       {dragging && <div className="jx-canvas-dragMask" />}
       <CanvasTabBar />

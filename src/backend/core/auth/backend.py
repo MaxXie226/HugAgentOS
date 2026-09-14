@@ -336,6 +336,15 @@ def require_auth(required: bool = True):
         ) -> Optional[UserContext]:
             auth_mode = _auth_mode()
 
+            # Match required authentication: the desktop shell owns the local
+            # identity, even when a forwarded cloud cookie is absent or stale.
+            from core.auth.desktop_bridge import resolve_bridge_user
+            from starlette.concurrency import run_in_threadpool
+
+            bridge_user = await run_in_threadpool(resolve_bridge_user, request, db)
+            if bridge_user is not None:
+                return bridge_user
+
             # ── Try Cookie session first (all modes) ──
             try:
                 session_user = await _resolve_session_user(request)

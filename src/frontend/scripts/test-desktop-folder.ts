@@ -1,0 +1,43 @@
+import assert from 'node:assert/strict';
+import { setHybridDual, isLocalProject } from '../src/api';
+import { listenForFolderProjects } from '../src/desktop/folderMenu';
+const target = new EventTarget();
+const opened: string[] = [];
+const errors: unknown[] = [];
+let requests = 0;
+let fail = false;
+let navigation = 'chat-one';
+let release: (() => void) | undefined;
+globalThis.fetch = async (_url, init) => {
+  requests++;
+  assert.equal(new Headers(init?.headers).get('x-hugagent-target'), 'local');
+  assert.deepEqual(JSON.parse(String(init?.body)), {
+    kind: 'local', name: '项目', local_path: 'C:\\工作\\项目',
+  });
+  await new Promise<void>((resolve) => { release = resolve; });
+  if (fail) return new Response('failed', { status: 500 });
+  return new Response(JSON.stringify({code: 200, data: {project_id: 'local-menu', name: '项目'}}));
+};
+setHybridDual(true);
+const stop = listenForFolderProjects(target, (project) => opened.push(project.project_id), (e) => errors.push(e), () => navigation);
+const choose = () => target.dispatchEvent(new CustomEvent('hugagent:open-project-folder', {cancelable: true, detail: 'C:\\工作\\项目'}));
+choose(); choose();
+assert.equal(requests, 1);
+assert.equal(opened.length, 0);
+release!();
+await new Promise((resolve) => setTimeout(resolve, 10));
+assert.deepEqual(opened, ['local-menu']);
+assert.equal(isLocalProject('local-menu'), true);
+fail = true; choose(); release!();
+await new Promise((resolve) => setTimeout(resolve, 10));
+assert.equal(errors.length, 1);
+assert.equal(opened.length, 1);
+fail = false; choose(); navigation = 'chat-two'; release!();
+await new Promise((resolve) => setTimeout(resolve, 10));
+assert.equal(opened.length, 1, 'late folder response must not steal a newer navigation');
+choose(); stop(); release!();
+await new Promise((resolve) => setTimeout(resolve, 10));
+assert.equal(opened.length, 1, 'detached page must not navigate after a late response');
+choose();
+assert.equal(requests, 4);
+console.log('desktop folder menu checks passed');

@@ -295,3 +295,48 @@ Local image, PDF, Office and text previews route to the local service. Office fi
 Update both the desktop frontend and bundled local backend for this behavior. Updating only the cloud service does not update file actions in installed clients.
 
 New standalone conversations in hybrid mode default to local execution. You can switch to cloud before sending, and the choice is saved for that conversation. Project conversations follow project ownership; existing conversations retain their execution location.
+
+
+## Canvas layout and local project delivery
+
+Desktop platforms share the same split layout. Canvas uses the space remaining after the navigation sidebar and keeps at least 420px for the conversation. When the main area is narrower than 900px, preview covers it; use the sidebar button to return to chat. Drag the separator or use its arrow keys to resize. Long filenames, paths and model names wrap or truncate; code blocks scroll horizontally within their own bounds.
+
+Use `pin_to_workspace(file_paths=["report.docx"])` to display an existing local project file directly. Paths may be relative to the current project or absolute within it. `sandbox_get_artifact` also registers project files by reference, without copying or uploading their contents into artifacts storage. Repeated delivery keeps the same reference; preview and native open access the original file. Scratch exports and cloud delivery retain their existing behavior.
+
+References remain in chat history. Access rechecks project permission, the directory binding and symlink boundaries. Moved or deleted files and rebound projects become unavailable rather than falling back to an old copy. Existing artifact copies are not deleted automatically. This change requires updating the bundled desktop frontend and local backend.
+
+Local project references read the current original contents on subsequent access. Saving in Canvas updates the original path using the existing local snapshot mechanism. Revoked folder access, deleted/rebound projects and files moved outside the project invalidate access; saving also requires folder write access.
+
+### Office commands and preview troubleshooting
+
+Full desktop runtimes include pinned OfficeCLI 1.0.144, available through the local `bash` tool as `officecli --version`.
+The release builder downloads and verifies its SHA-256 before bundling it; first installation requires no additional download.
+Native tool manifests and runtime build/smoke scripts participate in the dependency fingerprint, so changes replace old runtimes.
+Chromium for screenshots and LibreOffice for Office-to-PDF conversion are separate dependencies; OfficeCLI does not replace them.
+
+A local preview 401 should be diagnosed at the desktop identity bridge, without repeatedly signing the user out of the cloud.
+Preview and local-open requests both recognize the bridge identity and retain project access checks.
+HTML previews show readable loading errors and run successful pages in an isolated sandbox.
+These fixes require updated bundled frontend/backend resources; a cloud-only deployment cannot repair an older client.
+
+The desktop local runner disables OfficeCLI background self-updates so its executable stays at the version verified in the bundled runtime.
+
+### Platform compatibility for desktop updates
+
+New clients query updates by operating system and architecture. An unpublished platform reports no available update.
+Platforms may ship separately while other platforms retain their latest available release. The shared manifest
+for older clients advances only when all required platforms have packages for the same version, preventing
+missing-platform errors on Mac and repeated installation of older Windows packages. Automatic updates require
+a signed updater archive and a manifest; uploading a DMG for manual installation alone does not enable them.
+
+### Desktop menus and update downloads
+
+In hybrid mode, the File menu contains New Chat, Open Folder, and Quit. Selecting a folder opens a new conversation bound to that local project. Cancelling leaves the current conversation unchanged.
+
+Check for Updates and About show the running desktop version. A background startup check discovers updates; when one is available, the sidebar help icon becomes a download button. Clicking it shows the current and target versions and release notes. Confirmation starts a download progress card, followed by installation and automatic restart. Cancelled or failed attempts can be retried. Windows uses silent installation without an installer window; the app and progress card close when replacement begins, then the updated app opens automatically. Any required system permission prompt remains controlled by the operating system.
+
+These interactions ship in the desktop package. Existing clients must first upgrade to a version that includes them.
+
+Desktop update discovery uses a persistent release notification stream. Each update-server worker shares one observer that checks release-file metadata about every two seconds. A changed release notifies connected clients, which then check their platform manifest. The sidebar reuses the existing local desktop event stream: it no longer polls every two seconds and identical state does not re-render it. Idle connections use a heartbeat about every 15 seconds, with an additional manifest safety check about every 30 minutes.
+
+Disconnected streams reconnect with backoff. Servers without notification support fall back to a check about every five minutes. Manual checks remain available. Fast notifications require both the update-server backend and the desktop package to be upgraded; a new client against an old server uses the low-frequency fallback. Discovering a release never automatically downloads or installs it.

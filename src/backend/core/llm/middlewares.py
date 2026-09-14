@@ -910,9 +910,9 @@ class FileContextMiddleware(MiddlewareBase):
         # 2. Images. Two paths, decided by whether the *effective* model can see:
         #    - natively multimodal  → pass the bytes through as DataBlocks (best fidelity)
         #    - text-only           → vision bridge transcribes them into text evidence
-        #      (core/vision), because the media blocks would otherwise be dropped
-        #      downstream in chat_models._without_multimodal_content and the model
-        #      would be blind to the upload.
+        #      (core/vision). This is the only place the choice is made: downstream
+        #      never degrades media, so a text-only model that received raw bytes
+        #      would fail the request outright rather than silently go blind.
         image_files = [f for f in uploaded_files if _is_image(f)]
         if not image_files:
             return

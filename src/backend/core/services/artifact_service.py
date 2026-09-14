@@ -163,6 +163,10 @@ def persist_artifacts(
     workflow.py's finally had already reset the ContextVar, causing project
     outputs to land in the wrong scope.
     """
+    from core.artifacts.local_project import is_local_project_ref
+
+    # Local project cards are live file references, not MySpace storage objects.
+    collected = [a for a in collected if not is_local_project_ref(a.get("file_id", ""))]
     if not collected:
         return
 

@@ -2,6 +2,8 @@
 
 from typing import Any, Optional
 
+from core.db.paging import DEFAULT_PAGE_SIZE
+
 
 def project_subtree_folder_ids(db: Any, scope: Any) -> None:
     return None
@@ -14,7 +16,8 @@ def list_organization_project_files(
     folder_id: str,
     mime_prefix: Optional[str],
     keyword: str,
-    limit: int,
+    page: int = 1,
+    page_size: Optional[int] = DEFAULT_PAGE_SIZE,
 ) -> None:
     return None
 

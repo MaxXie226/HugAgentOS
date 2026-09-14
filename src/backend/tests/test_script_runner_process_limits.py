@@ -197,3 +197,33 @@ def test_ce_installer_and_script_runner_ship_office_skill_runtime():
     assert "/usr/local/bin/officecli" in dockerfile
     for retired in ("word-cli", "excel-cli", "ppt-cli"):
         assert f"/usr/local/bin/{retired}" not in dockerfile
+
+
+def test_local_managed_officecli_disables_self_update(tmp_path):
+    import os
+    import subprocess
+
+    code = """
+from fastapi.testclient import TestClient
+from services.script_runner_service.server import app
+with TestClient(app) as client:
+    response = client.post('/execute', json={
+        'script_content': "import os; print(os.getenv('OFFICECLI_SKIP_UPDATE', 'unset'))",
+        'script_name': 'check_env.py', 'language': 'python', 'session_id': 'officecli-env',
+    })
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result['exit_code'] == 0, result
+    print(result['stdout'].strip())
+"""
+    for profile, expected in (("local", "1"), ("docker", "unset")):
+        result = subprocess.check_output(
+            [sys.executable, "-c", code],
+            env={
+                **os.environ,
+                "DEPLOY_PROFILE": profile,
+                "SCRIPT_RUNNER_WORKSPACE": str(tmp_path / profile),
+            },
+            text=True,
+        )
+        assert result.strip().splitlines()[-1] == expected

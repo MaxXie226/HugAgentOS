@@ -507,8 +507,8 @@ export const SETTINGS_DICT: Record<string, string> = {
   '给多个供应商填同一个组名，即在对外网关合并为一个对外别名的多上游，自动负载均衡+故障转移；留空表示独立单上游':
     'Give multiple providers the same group name to merge them into one external alias with multiple upstreams (auto load-balancing + failover); leave empty for a standalone single upstream.',
   '网关权重': 'Gateway weight',
-  '同组内加权轮询的权重，值越大分到的流量越多；默认 1':
-    'Weight for weighted round-robin within the group; higher values receive more traffic. Default 1.',
+  '值越大越优先使用：对外网关同组内按此加权轮询，主模型不可用时也按此顺序自动切换到下一个供应商；默认 1':
+    'Higher means preferred: it weights round-robin within an external gateway group, and also orders the automatic switch to the next provider when the main model is unavailable. Default 1.',
 
   // ── CE 个人系统设置（SystemModelPanel / SystemServicePanel / MyLogsPanel）──
   '模型服务': 'Model Services',

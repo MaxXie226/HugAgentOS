@@ -21,6 +21,7 @@ mod notify;
 mod prefs;
 mod proxy;
 mod update;
+mod update_monitor;
 
 use std::sync::Arc;
 
@@ -528,6 +529,7 @@ pub fn run() {
 
             // 系统托盘：关闭窗口时「最小化到托盘」后，从这里恢复主窗口。
             build_tray(app)?;
+            update_monitor::start(handle.clone(), cfg.update_base(), http.clone());
 
             // A1：后台通知轮询——自动化/后台任务跑完发原生系统通知。
             notify::start(handle.clone(), port, token.clone(), http.clone(), hybrid_local);

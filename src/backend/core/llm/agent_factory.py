@@ -2157,6 +2157,7 @@ async def create_agent_executor(
             chat_id=chat_id,
             sandbox_session_id=_sbx_sess,
             user_id=current_user_id,
+            scope=_proj_scope,
         )
         # Site publishing is now plugin-based: the sites plugin's site_publish
         # MCP provides the publish_site tool; the built-in native tool is no
@@ -2323,7 +2324,7 @@ async def create_agent_executor(
         # ── Phase 3.8: Register pin_to_workspace ──
         # Lets the agent gate which generated files reach the user-visible
         # assistant message. See core/llm/workspace.py for the per-run state.
-        register_pin_to_workspace(toolkit, scope=_proj_scope)
+        register_pin_to_workspace(toolkit, scope=_proj_scope, sandbox_session_id=_sbx_sess)
 
         # ── Phase 3.85: run_job（工作流模式的作业编排面） ──
         # **用户显式触发才注册**（workflow_mode）：斜杠命令 /workflow 或 + 菜单选「工作流
@@ -2989,32 +2990,14 @@ async def create_agent_executor(
                 _selected_provider_id
             )
             if _selected_provider_cfg:
+                from core.llm.chat_models import build_model_for_mode
+                from core.llm.failover import with_failover
+
                 _mode = (chat_mode or "medium").lower()
-                _disable_thinking = _mode in ("fast", "turbo")
-                _supports_effort = bool(
-                    (_selected_provider_cfg.extra or {}).get("supports_reasoning_effort")
-                )
-                _reasoning_effort = (
-                    _mode
-                    if (
-                        not _disable_thinking
-                        and _supports_effort
-                        and _mode in ("medium", "high", "max")
-                    )
-                    else None
-                )
-                default_model = make_chat_model(
-                    model=_selected_provider_cfg.model_name,
-                    temperature=_selected_provider_cfg.temperature,
-                    max_tokens=_selected_provider_cfg.max_tokens,
-                    timeout=_selected_provider_cfg.timeout,
-                    base_url=_selected_provider_cfg.base_url,
-                    api_key=_selected_provider_cfg.api_key,
-                    provider=_selected_provider_cfg.provider,
-                    provider_extra=_selected_provider_cfg.provider_extra,
-                    disable_thinking=_disable_thinking,
-                    reasoning_effort=_reasoning_effort,
-                    stream=True,
+                default_model = with_failover(
+                    build_model_for_mode(_selected_provider_cfg, mode=_mode, stream=True),
+                    _selected_provider_cfg,
+                    mode=_mode,
                 )
                 _log.info(
                     "[factory] using user-selected model: %s",
@@ -3029,16 +3012,21 @@ async def create_agent_executor(
 
             _mode_cfg = ModelConfigService.get_instance().resolve(_mode_role)
             if _mode_cfg:
-                default_model = make_chat_model(
-                    model=_mode_cfg.model_name,
-                    temperature=_mode_cfg.temperature,
-                    max_tokens=_mode_cfg.max_tokens,
-                    timeout=_mode_cfg.timeout,
-                    base_url=_mode_cfg.base_url,
-                    api_key=_mode_cfg.api_key,
-                    provider=_mode_cfg.provider,
-                    provider_extra=_mode_cfg.provider_extra,
-                    stream=True,
+                from core.llm.failover import with_failover
+
+                default_model = with_failover(
+                    make_chat_model(
+                        model=_mode_cfg.model_name,
+                        temperature=_mode_cfg.temperature,
+                        max_tokens=_mode_cfg.max_tokens,
+                        timeout=_mode_cfg.timeout,
+                        base_url=_mode_cfg.base_url,
+                        api_key=_mode_cfg.api_key,
+                        provider=_mode_cfg.provider,
+                        provider_extra=_mode_cfg.provider_extra,
+                        stream=True,
+                    ),
+                    _mode_cfg,
                 )
                 _log.info("[factory] using %s model: %s", _mode_role, _mode_cfg.model_name)
         except Exception as exc:

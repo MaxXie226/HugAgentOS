@@ -98,9 +98,10 @@ class VisionResult:
 def model_supports_vision(cfg: Optional[ResolvedModelConfig]) -> bool:
     """该模型是否原生多模态。
 
-    以 provider 的 ``extra_config.supports_vision`` 显式开关为准。旧路径靠匹配网关
-    报错文案事后判断（``chat_models._is_multimodal_unsupported_error``），换个网关
-    文案就失效、还得先发一次注定失败的请求；那条现在只当兜底。
+    以 provider 的 ``extra_config.supports_vision`` 显式开关为准，这是「模型能不能
+    看图」的唯一判定处。曾经还有一条靠匹配网关报错文案事后补救的路径，换个网关文案
+    就失效、还得先发一次注定失败的请求，而且补救手段是把图悄悄换成文字——已删除：
+    图一旦交给工具返回，就必须原样送达（见 ``core.llm.tool_result_media``）。
     """
     if cfg is None:
         return False

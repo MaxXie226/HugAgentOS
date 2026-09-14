@@ -472,6 +472,8 @@ def _local_safe_path_entries() -> list[str]:
 # explicit equivalents. Pass the site-building/Node env through and prepend
 # only trusted executable directories to the clean PATH. No-op elsewhere.
 if os.getenv("DEPLOY_PROFILE") == "local":
+    # Keep the bundled native tool at the version verified by the desktop release.
+    SAFE_ENV["OFFICECLI_SKIP_UPDATE"] = "1"
     for _k in (
         "SCRIPT_RUNNER_WORKSPACE",
         "SITE_TEMPLATE_HOME",

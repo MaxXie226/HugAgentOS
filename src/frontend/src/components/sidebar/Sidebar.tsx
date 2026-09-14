@@ -1,3 +1,5 @@
+import { DesktopUpdateEntry } from '../../desktop/DesktopUpdateEntry';
+import { useDesktopUpdateStatus } from '../../desktop/useDesktopUpdateStatus';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { DragEvent as ReactDragEvent } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
@@ -675,6 +677,7 @@ export function Sidebar({
       },
     ],
   };
+  const desktopUpdateStatus = useDesktopUpdateStatus();
   const helpMenu: MenuProps = {
     items: [
       ...(!IS_COMMUNITY_EDITION_BUILD ? [{
@@ -788,13 +791,15 @@ export function Sidebar({
           )}
           <div className="jx-miniRailSpacer" />
           <div className="jx-miniRailFooter">
-            <Dropdown menu={helpMenu} trigger={['click']} placement="topRight" overlayClassName="jx-settingsMenu">
-              <Tooltip title={t(IS_COMMUNITY_EDITION_BUILD ? '官方文档' : '帮助 / 更新记录')} placement="right">
-                <button type="button" className="jx-miniRailBtn" aria-label={t(IS_COMMUNITY_EDITION_BUILD ? '官方文档' : '帮助')}>
-                  <img src="/home/help.svg" alt="" className="jx-miniRailIcon" style={{ opacity: 0.55 }} />
-                </button>
-              </Tooltip>
-            </Dropdown>
+            <DesktopUpdateEntry status={desktopUpdateStatus} className="jx-miniRailBtn">
+              <Dropdown menu={helpMenu} trigger={['click']} placement="topRight" overlayClassName="jx-settingsMenu">
+                <Tooltip title={t(IS_COMMUNITY_EDITION_BUILD ? '官方文档' : '帮助 / 更新记录')} placement="right">
+                  <button type="button" className="jx-miniRailBtn" aria-label={t(IS_COMMUNITY_EDITION_BUILD ? '官方文档' : '帮助')}>
+                    <img src="/home/help.svg" alt="" className="jx-miniRailIcon" style={{ opacity: 0.55 }} />
+                  </button>
+                </Tooltip>
+              </Dropdown>
+            </DesktopUpdateEntry>
             <Dropdown menu={footerSettingsMenu} trigger={['click']} placement="topLeft" overlayClassName="jx-settingsMenu">
               <Tooltip title={authUser?.nickname || authUser?.real_name || authUser?.username || t('用户')} placement="right">
                 <button type="button" className="jx-miniRailBtn jx-miniRailAvatarBtn" aria-label={t('用户菜单')}>
@@ -1106,11 +1111,13 @@ export function Sidebar({
               <span className="jx-userName">{authUser?.nickname || authUser?.real_name || authUser?.username || t('用户')}</span>
             </button>
           </Dropdown>
-          <Dropdown menu={helpMenu} trigger={['click']} placement="topRight" overlayClassName="jx-settingsMenu">
-            <button className="jx-helpBtn" title={t(IS_COMMUNITY_EDITION_BUILD ? '官方文档' : '帮助')}>
-              <img src="/home/help.svg" alt="" style={{ width: 16, height: 16, opacity: 0.45 }} />
-            </button>
-          </Dropdown>
+          <DesktopUpdateEntry status={desktopUpdateStatus} className="jx-helpBtn">
+            <Dropdown menu={helpMenu} trigger={['click']} placement="topRight" overlayClassName="jx-settingsMenu">
+              <button className="jx-helpBtn" title={t(IS_COMMUNITY_EDITION_BUILD ? '官方文档' : '帮助')}>
+                <img src="/home/help.svg" alt="" style={{ width: 16, height: 16, opacity: 0.45 }} />
+              </button>
+            </Dropdown>
+          </DesktopUpdateEntry>
         </div>
 
         <Modal

@@ -1,9 +1,10 @@
+import { listenForFolderProjects } from './desktop/folderMenu';
 import { CapabilitySyncGate } from './components/desktop/CapabilitySyncGate';
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import {
   Layout, Button, Typography, Tag, Modal,
-  Tooltip,
+  Tooltip, message,
 } from 'antd';
 import {
   CloseOutlined,
@@ -115,6 +116,7 @@ export default function App() {
   const capabilitiesReady = useDeploymentModeStore((s) => s.capabilitiesReady);
   const deploymentModeLoaded = useDeploymentModeStore((s) => s.loaded);
   const canvasOpen = useCanvasStore((s) => s.isOpen);
+  const canvasPanelWidth = useCanvasStore((s) => s.panelWidth);
   const canvasFullscreen = useCanvasStore((s) => s.isFullscreen);
   const rightSidebarView = useCanvasStore((s) => s.activeView);
   const closeCanvas = useCanvasStore((s) => s.closeCanvas);
@@ -726,6 +728,29 @@ export default function App() {
     closeMobileSidebar();
   };
 
+  const openFolderProjectRef = useRef(handleNewProjectChat);
+  useEffect(() => { openFolderProjectRef.current = handleNewProjectChat; });
+  useEffect(() => {
+    if (!isDesktopShell || !authUserId ||
+      !['dual', 'local_only'].includes(desktopProvisionMode)) return;
+    const stop = listenForFolderProjects(window, (project) => {
+      openFolderProjectRef.current(project.project_id, project.name);
+      void useProjectStore.getState().fetchProjects();
+    }, (error) => {
+      message.error(t('新建本地项目失败') + '：' + (error instanceof Error ? error.message : String(error)));
+    }, () => JSON.stringify([
+      useChatStore.getState().currentChatId,
+      useCatalogStore.getState().panel,
+      useProjectStore.getState().currentProjectId,
+    ]));
+    const pending = sessionStorage.getItem('hugagent:pending-project-folder');
+    if (pending) {
+      sessionStorage.removeItem('hugagent:pending-project-folder');
+      window.dispatchEvent(new CustomEvent('hugagent:open-project-folder', { detail: pending, cancelable: true }));
+    }
+    return stop;
+  }, [isDesktopShell, desktopProvisionMode, authUserId]);
+
   const handleCapabilityClick = (capabilityId: string) => {
     // 知识库已并入「我的空间」的 Tab，首页快捷入口直接落到那个 Tab
     if (capabilityId === 'knowledge') {
@@ -821,7 +846,7 @@ export default function App() {
         onSelectSearchResult={handleSelectSearchResult}
       />
 
-      <Layout className={`jx-appMainLayout${canvasFullscreen ? ' is-canvasFullscreen' : ''}`} style={{ overflow: 'hidden', background: 'var(--color-bg-base)' }}>
+      <Layout className={`jx-appMainLayout${canvasFullscreen ? ' is-canvasFullscreen' : ''}`} style={{ overflow: 'hidden', background: 'var(--color-bg-base)', '--jx-canvas-preferred-width': canvasPanelWidth ? `${canvasPanelWidth}px` : undefined } as CSSProperties}>
         <div className={`jx-primaryPane${canvasOpen ? ' is-canvasOpen' : ''}${panel === 'chat' ? ' is-chatSurface' : ''}`}>
         {!showChatHeader && (
           <header className="jx-mobileHeader">

@@ -148,7 +148,7 @@ def test_cloud_root_scope_and_artifact_identity(env):
     db.commit()
     update(db, p, "# Updated\nPreserve", snapshot["instructions_revision"])
     assert db.get(Artifact, item["artifact_id"]).parsed_text is None
-    assert len([f for f in files.list_files(p) if f["name"] == "AGENTS.md"]) == 1
+    assert len([f for f in files.list_files(p).items if f["name"] == "AGENTS.md"]) == 1
     assert build_project_ctx(db, p.project_id)["project_instructions"] == "# Updated\nPreserve"
     assert svc.get(other.project_id, "alice")["instructions"] == "Other project rules"
     art.deleted_at = datetime.utcnow()

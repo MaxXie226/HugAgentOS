@@ -265,13 +265,18 @@ def instrument_model_usage(
     if getattr(model, "_jx_usage_instrumented", False):
         return model
 
-    provider_name = str(
-        provider
-        or getattr(model, "provider_id", "")
-        or getattr(model, "provider", "")
-        or getattr(model, "provider_name", "")
-        or type(model).__name__
-    )
+    def provider_name() -> str:
+        # Read per attempt, not once at install: a failover model answers from
+        # whichever endpoint is live, and attributing its calls to the endpoint
+        # that happened to be primary at startup would misreport spend. For a
+        # plain model the attributes never move and this returns the same value.
+        return str(
+            provider
+            or getattr(model, "provider_id", "")
+            or getattr(model, "provider", "")
+            or getattr(model, "provider_name", "")
+            or type(model).__name__
+        )
     original = getattr(model, "_call_api", None)
     if original is None or not callable(original):
         model._jx_usage_instrumented = True
@@ -301,7 +306,7 @@ def instrument_model_usage(
                     run_id=context.run_id,
                     kind="model",
                     operation_name=operation,
-                    provider=provider_name,
+                    provider=provider_name(),
                     model=operation,
                     status=status,
                     retry_of=_retry_of(key),

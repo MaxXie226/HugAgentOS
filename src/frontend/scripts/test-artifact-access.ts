@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { registerLocalChat, registerLocalProject, setHybridDual } from '../src/api';
+import { authFetch, onUnauthorized, registerLocalChat, registerLocalProject, setHybridDual } from '../src/api';
 import { useDeploymentModeStore } from '../src/stores/deploymentModeStore';
 import { artifactUrl, artifactOrigin, openLocalArtifact } from '../src/utils/artifactAccess';
 
@@ -63,3 +63,21 @@ globalThis.fetch = async (url) => {
 await openLocalArtifact({ url: '/v1/projects/local-project/local-files/raw?path=report.pdf' }, true,
   (url) => assert.equal(url, '/__desktop/open-path?path=%2Fproject'));
 console.log('artifact source and canvas ownership survive navigation; project API envelope supported');
+
+
+// A local preview 401 must remain a local failure, not reset the cloud login.
+let loginPrompts = 0;
+onUnauthorized(() => { loginPrompts += 1; });
+globalThis.fetch = async () => Response.json({detail:'请先登录'}, {status:401});
+for (const [input, init] of [
+  ['/api/files/page?hg_target=local', undefined],
+  ['/api/files/page', {headers:{'x-hugagent-target':'local'}}],
+  ['/api/files/page', {headers:new Headers({'x-hugagent-target':'local'})}],
+  [new Request('https://example.test/api/files/page', {headers:{'x-hugagent-target':'local'}}), undefined],
+] as [RequestInfo, RequestInit | undefined][]) {
+  assert.equal((await authFetch(input, init)).status, 401);
+  assert.equal(loginPrompts, 0, 'local file authentication must not prompt for cloud login');
+}
+assert.equal((await authFetch('/api/files/cloud')).status, 401);
+assert.equal(loginPrompts, 1, 'cloud session expiry still prompts for login');
+console.log('Local preview 401 preserves cloud login; cloud 401 retains login behavior');

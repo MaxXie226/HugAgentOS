@@ -99,6 +99,19 @@ def fetch_parsed_text(
     if not file_id:
         return ""
 
+    from core.artifacts.local_project import authorized_reference, is_local_project_ref
+    if is_local_project_ref(file_id):
+        item = authorized_reference(file_id, user_id)
+        if not item:
+            return ""
+        try:
+            from pathlib import Path
+            from core.content.file_parser import parse_file
+            # Live files must never use the immutable-artifact parsed-text cache.
+            return parse_file(Path(item["path"]).read_bytes(), item["name"]) or ""
+        except (OSError, RuntimeError, ValueError):
+            return ""
+
     try:
         from core.db.engine import SessionLocal
         from core.db.models import Artifact as ArtifactModel
@@ -176,6 +189,15 @@ def load_artifact_meta(file_id: str, user_id: Optional[str] = None) -> Optional[
     """Return lightweight artifact metadata (no parsed_text), or None if inaccessible."""
     if not file_id:
         return None
+    from core.artifacts.local_project import authorized_reference, is_local_project_ref
+    if is_local_project_ref(file_id):
+        item = authorized_reference(file_id, user_id)
+        if not item:
+            return None
+        return {"file_id": file_id, "filename": item["name"], "name": item["name"],
+                "mime_type": item["mime_type"], "size_bytes": item["size"], "summary": "",
+                "source": SOURCE_AI_GENERATED, "parse_error": None, "has_parsed_text": False}
+
     try:
         from core.db.engine import SessionLocal
         from core.db.models import Artifact as ArtifactModel

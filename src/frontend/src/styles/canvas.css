@@ -2,8 +2,18 @@
    Shared Right Sidebar — 文件预览 / 本体校验
    ══════════════════════════════════════════════════════ */
 
-.jx-rightSidebarSlot {
-  width: 58%;
+/* Size against the main area after the navigation sidebar, never the viewport.
+   420px keeps chat readable; below 900px a full-area preview replaces the split. */
+.jx-canvasPanelSlot {
+  width: clamp(400px, var(--jx-canvas-preferred-width, 58%), calc(100% - 420px));
+  max-width: calc(100% - 420px);
+}
+.jx-canvasPanelSlot > .jx-canvas,
+.jx-canvasPanelSlot > .jx-rightSidebar {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  flex: 1 1 0;
 }
 
 .jx-canvasPanelSlot {
@@ -379,16 +389,16 @@
   position: relative;
 }
 
-@media (max-width: 900px) {
-  .jx-rightSidebarSlot {
-    width: 72vw;
-    max-width: 78vw;
-  }
-
-  .jx-rightSidebarSlot > .jx-rightSidebar {
+@container chat-workspace (max-width: 899px) {
+  .jx-canvasPanelSlot {
+    position: absolute;
+    inset: 0;
+    z-index: 30;
     width: 100%;
-    max-width: none;
+    max-width: 100%;
   }
+  .jx-primaryPane.is-canvasOpen { visibility: hidden; }
+  .jx-canvas-dragHandle { display: none; }
 }
 /* 拖拽 resize 期间逐帧跟手，禁过渡 */
 .jx-canvas--dragging {
@@ -513,6 +523,13 @@
   font-size: 14px;
   color: var(--color-text-tertiary);
   transition: background .15s, color .15s;
+}
+/* File actions carry a label; reserve enough room instead of wrapping it inside an icon square. */
+.jx-canvas-header-actions > a.jx-canvas-actionBtn {
+  width: auto;
+  padding-inline: 8px;
+  gap: 4px;
+  white-space: nowrap;
 }
 .jx-canvas-actionBtn:hover {
   background: var(--color-bg-gray);

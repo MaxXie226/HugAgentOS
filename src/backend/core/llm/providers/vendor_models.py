@@ -43,6 +43,7 @@ from agentscope.model import (
 from agentscope.tool._types import ToolChoice
 
 from core.llm.reasoning_replay import ReasoningReplayMixin
+from core.llm.tool_result_media import InlineToolMediaMixin, NoDiskToolMediaMixin
 
 from ._fallback import StructuredFallbackMixin
 from ._image_tokens import ImageTokenCountingMixin
@@ -59,23 +60,27 @@ _WIRE_PROTOCOLS = {
 }
 
 
+# Anthropic 的 formatter 自己就把工具结果里的媒体当原生内容处理，不走
+# ``convert_tool_result_to_string``，因此无需叠加媒体 mixin。其余几家都会走到
+# 那条会落盘到宿主机的分支，统一用 NoDiskToolMediaMixin 截断；OpenAI 方言另外
+# 把媒体折回 tool 消息（见 core.llm.tool_result_media）。
 class ReplayAnthropicFormatter(ReasoningReplayMixin, AnthropicChatFormatter):
     pass
 
 
-class ReplayGeminiFormatter(ReasoningReplayMixin, GeminiChatFormatter):
+class ReplayGeminiFormatter(ReasoningReplayMixin, NoDiskToolMediaMixin, GeminiChatFormatter):
     pass
 
 
-class ReplayDashScopeFormatter(ReasoningReplayMixin, DashScopeChatFormatter):
+class ReplayDashScopeFormatter(ReasoningReplayMixin, NoDiskToolMediaMixin, DashScopeChatFormatter):
     pass
 
 
-class ReplayOllamaFormatter(ReasoningReplayMixin, OllamaChatFormatter):
+class ReplayOllamaFormatter(ReasoningReplayMixin, NoDiskToolMediaMixin, OllamaChatFormatter):
     pass
 
 
-class ReplayOpenAIFormatter(ReasoningReplayMixin, OpenAIChatFormatter):
+class ReplayOpenAIFormatter(ReasoningReplayMixin, InlineToolMediaMixin, OpenAIChatFormatter):
     pass
 
 
