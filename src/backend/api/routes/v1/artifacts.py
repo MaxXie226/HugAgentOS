@@ -10,12 +10,13 @@ import logging
 import os
 import re
 import threading
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Tuple
 
 from core.auth.backend import UserContext, get_current_user
 from core.content.kb_processing import vectorise_document_background
-from core.db.engine import get_db
-from core.db.models import Artifact, ChatMessage, ChatSession, KBDocument, KBSpace
+from core.db.engine import SessionLocal, get_db
+from core.db.models import Artifact, ChatMessage, ChatSession, KBDocument, KBSpace, UserShadow
 from core.db.paging import DEFAULT_PAGE_SIZE
 from core.db.repository import ArtifactRepository
 from core.infra.responses import error_response, success_response
@@ -37,14 +38,65 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/artifacts", tags=["artifacts"])
 
-# Users whose historical data has already been backfilled (process-lifetime cache).
-# A sync FastAPI endpoint runs in the threadpool, so concurrent ``/v1/artifacts``
-# polls genuinely race. ``_backfill_lock`` serialises the claim so the backfill
-# body runs at most once per user per process; concurrent requests skip it (the
+# Users whose historical data has already been backfilled. The authoritative marker
+# is durable (``users_shadow.metadata.artifacts_backfilled_at``) — a process-lifetime
+# set alone replays the whole scan after every restart, which froze the backend for
+# minutes on the first 「我的空间」 open. The set below only caches that marker so the
+# steady-state path costs no query. ``_backfill_lock`` serialises the claim so the
+# scan body runs at most once per user per process; concurrent polls skip it (the
 # listing still works off whatever is already committed).
+_BACKFILL_MARKER = "artifacts_backfilled_at"
+_BACKFILL_BATCH = 500
 _backfilled_users: set = set()
 _backfilling_users: set = set()
 _backfill_lock = threading.Lock()
+# Strong refs to the detached scans; asyncio only holds weak ones.
+_backfill_tasks: set = set()
+
+
+def _backfill_already_done(db: Session, user_id: str) -> bool:
+    row = db.query(UserShadow.extra_data).filter(UserShadow.user_id == user_id).first()
+    return bool(row and (row[0] or {}).get(_BACKFILL_MARKER))
+
+
+def _mark_backfill_done(db: Session, user_id: str) -> None:
+    from core.services.user_service import UserService
+
+    UserService(db).update_user_metadata(
+        user_id, {_BACKFILL_MARKER: datetime.now(timezone.utc).isoformat()}
+    )
+
+
+def _run_backfill_once(user_id: str) -> None:
+    """Run the historical scan at most once per user, ever. Blocking — off the loop.
+
+    Owns its own Session: it is handed to a worker thread and must not share the
+    request's one. Only a clean run stamps the durable marker, so a failure retries
+    on the next open instead of silently dropping the user's old files.
+    """
+    with _backfill_lock:
+        if user_id in _backfilled_users or user_id in _backfilling_users:
+            return
+        _backfilling_users.add(user_id)
+    db = SessionLocal()
+    try:
+        if not _backfill_already_done(db, user_id):
+            _backfill_artifacts_from_messages(user_id, db)
+            _mark_backfill_done(db, user_id)
+        with _backfill_lock:
+            _backfilled_users.add(user_id)
+    except Exception:  # noqa: BLE001 — a failed backfill must not break the listing
+        logger.warning("backfill_artifacts failed for user %s", user_id, exc_info=True)
+        db.rollback()
+        # Stand down for this process. The durable marker is untouched, so the scan
+        # retries after a restart — without it, every panel open would re-run a
+        # full-history scan for an account whose backfill keeps failing.
+        with _backfill_lock:
+            _backfilled_users.add(user_id)
+    finally:
+        db.close()
+        with _backfill_lock:
+            _backfilling_users.discard(user_id)
 
 
 # 读时对账：列「我的空间」之前先把沙箱镜像目录里新落盘的文件登记上，并把界面上已删的
@@ -79,12 +131,7 @@ class AddArtifactToKBRequest(BaseModel):
 # ── Shared artifact-ref helpers ───────────────────────────────────────────
 # Moved to core.content.artifact_refs so lower layers can use them without
 # importing this API route module. Re-exported here for existing call sites.
-from core.content.artifact_refs import (  # noqa: E402
-    extract_file_ref,
-    extract_file_refs,
-    infer_artifact_type,
-    resolve_artifact_storage_key,
-)
+from core.content.artifact_refs import extract_file_refs, infer_artifact_type  # noqa: E402
 
 
 def sanitize_chat_preview(content: Optional[str], max_len: int = 200) -> str:
@@ -115,7 +162,7 @@ def sanitize_chat_preview(content: Optional[str], max_len: int = 200) -> str:
     return text
 
 
-# ── Backfill (runs once per user per process) ─────────────────────────────
+# ── Backfill (runs once per user, ever — see the durable marker above) ────
 
 
 def _backfill_artifacts_from_messages(user_id: str, db: Session) -> int:
@@ -135,15 +182,10 @@ def _backfill_artifacts_from_messages(user_id: str, db: Session) -> int:
     User attachments (``extra_data.attachments``) are always scraped —
     those represent files the user explicitly uploaded.
     """
-    # Dedup against the GLOBAL artifact_id space, not this user's rows:
-    # ``Artifact.artifact_id`` is a single-column global primary key, so a
-    # content-hash file id already owned by another user/chat would otherwise
-    # slip past a user-filtered set and blow up the whole INSERT batch.
-    existing_ids = set(row[0] for row in db.query(Artifact.artifact_id).all())
-
-    # Scan both assistant messages (tool_calls) and user messages (attachments).
-    # Also carry the chat session's project_id so edition-specific scope fields
-    # are preserved during the backfill.
+    # Pass A — stream the messages and collect candidate refs. A heavy account
+    # carries hundreds of MB of ``tool_calls``/``metadata`` JSON, so hold at most a
+    # batch at a time. Nothing else may touch this Session while the server-side
+    # cursor is open: scope lookups and inserts are deferred to pass B.
     rows = (
         db.query(
             ChatMessage.chat_id,
@@ -158,22 +200,12 @@ def _backfill_artifacts_from_messages(user_id: str, db: Session) -> int:
             ChatSession.deleted_at.is_(None),
             ChatMessage.role.in_(["assistant", "user"]),
         )
-        .all()
+        .yield_per(_BACKFILL_BATCH)
     )
 
-    # Cache project_id → artifact scope fields to reduce repeated lookups.
-    from core.services.project_scope import (  # local: avoid top-level cycle
-        project_scope_from_chat_id,
-    )
-
-    _project_columns_cache: Dict[str, Dict[str, Optional[str]]] = {}
-
-    def _fields_for_chat(chat_id: str) -> Dict[str, Optional[str]]:
-        scope = project_scope_from_chat_id(db, chat_id)
-        return artifact_scope_fields(scope)
-
-    created = 0
-    for chat_id, role, tool_calls_col, extra_data, _project_id in rows:
+    pending: List[Tuple[str, Optional[str], Dict[str, Any]]] = []
+    candidate_ids: set = set()
+    for chat_id, role, tool_calls_col, extra_data, project_id in rows:
         file_refs: List[Dict[str, Any]] = []
         is_strict_message = (
             isinstance(extra_data, dict) and extra_data.get("workspace_files") is not None
@@ -193,57 +225,93 @@ def _backfill_artifacts_from_messages(user_id: str, db: Session) -> int:
             for att in extra_data.get("attachments") or []:
                 file_refs.extend(extract_file_refs(att))
 
-        if not file_refs:
-            continue
-
-        if _project_id and _project_id in _project_columns_cache:
-            scope_fields = _project_columns_cache[_project_id]
-        else:
-            scope_fields = _fields_for_chat(chat_id)
-            if _project_id:
-                _project_columns_cache[_project_id] = scope_fields
-
         for ref in file_refs:
-            fid = ref["file_id"]
-            if fid in existing_ids:
+            # The same id shows up across sources and across messages; pass B keeps
+            # only the first, so holding the rest just costs memory.
+            if ref["file_id"] in candidate_ids:
                 continue
-            # Per-row SAVEPOINT: a residual collision (cross-process race, or a
-            # duplicate id we couldn't see) rolls back ONLY this row, never the
-            # whole batch. Plain ``db.add`` + a single trailing commit would let
-            # one bad row abort the entire transaction (the old behaviour).
-            existing_ids.add(fid)  # claim before insert so dup refs in-batch skip
-            try:
-                with db.begin_nested():
-                    db.add(
-                        Artifact(
-                            artifact_id=fid,
-                            chat_id=chat_id,
-                            user_id=user_id,
-                            type=infer_artifact_type(ref["mime_type"]),
-                            title=ref["name"],
-                            filename=ref["name"],
-                            size_bytes=max(ref.get("size", 0) or 0, 1),
-                            mime_type=ref["mime_type"],
-                            storage_key=ref.get("storage_key") or f"artifacts/{fid}",
-                            storage_url=ref.get("url", ""),
-                            extra_data={"source": "backfill"},
-                            **scope_fields,
-                        )
+            candidate_ids.add(ref["file_id"])
+            pending.append((chat_id, project_id, ref))
+
+    if not pending:
+        return 0
+
+    # Dedup against the GLOBAL artifact_id space, not this user's rows:
+    # ``Artifact.artifact_id`` is a single-column global primary key, so a
+    # content-hash file id already owned by another user/chat would otherwise
+    # slip past a user-filtered set and blow up the whole INSERT batch. Look the
+    # candidates up by id instead of pulling every id in the table — that scan
+    # grows with the whole install, not with what this user actually references.
+    existing_ids: set = set()
+    candidates = list(candidate_ids)
+    for i in range(0, len(candidates), _BACKFILL_BATCH):
+        existing_ids.update(
+            row[0]
+            for row in db.query(Artifact.artifact_id).filter(
+                Artifact.artifact_id.in_(candidates[i : i + _BACKFILL_BATCH])
+            )
+        )
+
+    # Pass B — insert what is missing. A chat with no project can only ever
+    # resolve to the empty scope, so skip the lookup entirely for those; it used
+    # to cost one ChatSession round-trip per referenced message.
+    from core.services.project_scope import (  # local: avoid top-level cycle
+        project_scope_from_chat_id,
+    )
+
+    rootless_fields = artifact_scope_fields(None)
+    scope_cache: Dict[str, Dict[str, Optional[str]]] = {}
+
+    created = 0
+    for chat_id, project_id, ref in pending:
+        fid = ref["file_id"]
+        if fid in existing_ids:
+            continue
+        if not project_id:
+            scope_fields = rootless_fields
+        elif project_id in scope_cache:
+            scope_fields = scope_cache[project_id]
+        else:
+            scope_fields = artifact_scope_fields(project_scope_from_chat_id(db, chat_id))
+            scope_cache[project_id] = scope_fields
+        # Per-row SAVEPOINT: a residual collision (cross-process race, or a
+        # duplicate id we couldn't see) rolls back ONLY this row, never the
+        # whole batch. Plain ``db.add`` + a single trailing commit would let
+        # one bad row abort the entire transaction (the old behaviour).
+        existing_ids.add(fid)  # claim before insert so dup refs in-batch skip
+        try:
+            with db.begin_nested():
+                db.add(
+                    Artifact(
+                        artifact_id=fid,
+                        chat_id=chat_id,
+                        user_id=user_id,
+                        type=infer_artifact_type(ref["mime_type"]),
+                        title=ref["name"],
+                        filename=ref["name"],
+                        size_bytes=max(ref.get("size", 0) or 0, 1),
+                        mime_type=ref["mime_type"],
+                        storage_key=ref.get("storage_key") or f"artifacts/{fid}",
+                        storage_url=ref.get("url", ""),
+                        extra_data={"source": "backfill"},
+                        **scope_fields,
                     )
-                created += 1
-            except IntegrityError:
-                logger.debug("backfill skip dup %s", fid, exc_info=True)
-            except Exception:
-                logger.debug("backfill skip %s", fid, exc_info=True)
+                )
+            created += 1
+        except IntegrityError:
+            logger.debug("backfill skip dup %s", fid, exc_info=True)
+        except Exception:
+            logger.debug("backfill skip %s", fid, exc_info=True)
 
     if created:
         try:
             db.commit()
             logger.info("backfill_artifacts: created %d for user %s", created, user_id)
         except Exception:
-            logger.warning("backfill_artifacts commit failed", exc_info=True)
+            # Re-raise: the caller must not stamp the "already backfilled" marker
+            # on a run whose rows never landed, or the user loses them for good.
             db.rollback()
-            created = 0
+            raise
     return created
 
 
@@ -385,22 +453,17 @@ async def list_user_artifacts(
     """获取当前用户有权查看的文件与图片。"""
     uid = str(user.user_id)
 
-    # One-time backfill for historical data. Claim under a lock BEFORE running
-    # the (slow) scan so concurrent polls don't all re-enter and collide; losers
-    # skip and serve whatever's already committed (next poll sees the backfill).
-    should_backfill = False
-    with _backfill_lock:
-        if uid not in _backfilled_users and uid not in _backfilling_users:
-            _backfilling_users.add(uid)
-            should_backfill = True
-    if should_backfill:
-        try:
-            _backfill_artifacts_from_messages(uid, db)
-            with _backfill_lock:
-                _backfilled_users.add(uid)
-        finally:
-            with _backfill_lock:
-                _backfilling_users.discard(uid)
+    # One-time backfill for historical data. It scans every message the account ever
+    # wrote, so it never runs inline — doing that on the event loop froze the whole
+    # backend for minutes. It also must not go through ``BackgroundTasks``: those run
+    # on the shared request threadpool, which every endpoint needs via ``get_db``
+    # (see the postmortem at the top of core/kb/index_queue.py). Detached to the
+    # default executor instead, like the mirror reconcile below. The rows it adds are
+    # historical, so the next listing picks them up.
+    if uid not in _backfilled_users:
+        task = asyncio.create_task(asyncio.to_thread(_run_backfill_once, uid))
+        _backfill_tasks.add(task)
+        task.add_done_callback(_backfill_tasks.discard)
 
     if scope != "all":
         # 文件 IO + 可能的对象存储下载，丢到线程里做，别卡住事件循环

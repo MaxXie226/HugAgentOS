@@ -4,9 +4,11 @@ Storage mode is controlled by the STORAGE_TYPE environment variable:
 - 'local' (default): files are written under
   ``${STORAGE_PATH:-result}/artifacts/`` on the local filesystem and served
   directly via FileResponse.
-- 'oss': files are uploaded to Aliyun OSS via OSSStorageBackend.  A local
-  JSON index is still maintained for fast look-ups, and it is also backed up
-  to OSS so that the index survives container restarts.
+- 'oss': files are uploaded to Aliyun OSS via OSSStorageBackend.
+
+Metadata is one JSON file per artifact (see :func:`_record_path`); in OSS mode
+each record is mirrored alongside the bytes so the registry survives losing the
+local volume.
 
 Artifacts are downloaded via ``GET /files/{file_id}``.
 """
@@ -17,7 +19,6 @@ import json
 import logging
 import os
 import shutil
-import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -25,18 +26,41 @@ from uuid import uuid4
 
 logger = logging.getLogger(__name__)
 
-# ── Local path (both modes use it to store the index file) ────────────────────────
+# ── Local paths ──────────────────────────────────────────────────────────────
 # Prefer STORAGE_PATH (usually /app/storage inside the container) to avoid creating
 # a no-permission directory under /app; fall back to the project root result/ when unset.
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 _STORAGE_BASE = os.getenv("STORAGE_PATH", "").strip()
 _BASE_DIR = Path(_STORAGE_BASE).expanduser() if _STORAGE_BASE else (_PROJECT_ROOT / "result")
 _STORE_DIR = (_BASE_DIR / "artifacts").resolve()
-_INDEX_PATH = _STORE_DIR / "index.json"
-_LOCK = threading.Lock()
 
-# Key of the index file in OSS (OSSStorageBackend adds the prefix automatically)
-_OSS_INDEX_KEY = "artifacts/_index.json"
+# ── Record layout ────────────────────────────────────────────────────────────
+# One JSON file per artifact, bucketed by the first two hex characters of its
+# id: ``artifacts/records/<xx>/<file_id>.json``.
+#
+# This used to be a single ``index.json`` holding every record. Registering one
+# new artifact rewrote that whole file and re-uploaded it to OSS, and every
+# single lookup re-read and re-parsed it — 12.9 MB and 26k records on the
+# production install, both costs growing with the install and both paid on the
+# request path. Records are independent rows and nothing ever enumerates them
+# during normal operation, so giving each its own file makes reads and writes
+# O(1) no matter how large the install gets.
+# Every path below derives from _STORE_DIR so that redirecting the store (tests,
+# a relocated STORAGE_PATH) is one substitution rather than a set of globals that
+# have to be kept in step.
+_RECORDS_DIRNAME = "records"
+_LEGACY_INDEX_NAME = "index.json"
+_SHARD_LEN = 2
+
+# Record keys in object storage (the backend adds its own prefix).
+_OSS_RECORD_PREFIX = "artifacts/_records"
+# Key of the monolithic index an install had before records were split out. It is
+# still the only object-storage copy of everything written before the split, so the
+# restore path reads it.
+_OSS_LEGACY_INDEX_KEY = "artifacts/_index.json"
+
+# Bucket directories already created in this process (see _ensure_bucket).
+_known_buckets: set = set()
 
 
 # ── Helper: get the current STORAGE_TYPE ──────────────────────────────────
@@ -59,63 +83,168 @@ def _now_iso() -> str:
 
 
 def _ensure_store() -> None:
-    """Ensure the local dir and index file exist; in OSS mode, try to restore the index from OSS."""
+    """Make sure the local artifact directory exists."""
     _STORE_DIR.mkdir(parents=True, exist_ok=True)
 
-    if not _INDEX_PATH.exists():
-        # OSS mode: try to restore the index from OSS (recover after a container restart)
-        if _storage_type() == "oss":
-            try:
-                storage = _get_oss_storage()
-                content = storage.download_bytes(_OSS_INDEX_KEY)
-                _INDEX_PATH.write_bytes(content)
-                logger.info("Artifact index restored from OSS.")
-                return
-            except Exception:
-                pass  # first startup — nothing on OSS either, just create an empty index
 
-        _INDEX_PATH.write_text(
-            json.dumps({"files": {}}, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
+def _shard(file_id: str) -> str:
+    """Bucket name for an id. One definition so local and OSS layouts agree."""
+    return file_id[:_SHARD_LEN]
 
 
-def _load_index() -> Dict[str, Any]:
-    _ensure_store()
+def _legacy_index_path() -> Path:
+    return _STORE_DIR / _LEGACY_INDEX_NAME
+
+
+def _record_path(file_id: str) -> Path:
+    return _STORE_DIR / _RECORDS_DIRNAME / _shard(file_id) / f"{file_id}.json"
+
+
+def _record_oss_key(file_id: str) -> str:
+    return f"{_OSS_RECORD_PREFIX}/{_shard(file_id)}/{file_id}.json"
+
+
+def _read_record(file_id: str) -> Optional[Dict[str, Any]]:
     try:
-        raw = _INDEX_PATH.read_text(encoding="utf-8")
-        data = json.loads(raw) if raw.strip() else {}
-        if isinstance(data, dict) and isinstance(data.get("files"), dict):
-            return data
-    except Exception:
-        pass
-    return {"files": {}}
+        raw = _record_path(file_id).read_text(encoding="utf-8")
+    except OSError:
+        return None
+    try:
+        item = json.loads(raw)
+    except ValueError:
+        logger.warning("Artifact record is not valid JSON: %s", file_id)
+        return None
+    return item if isinstance(item, dict) else None
 
 
-def _save_index(data: Dict[str, Any]) -> None:
-    _ensure_store()
-    text = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
-    _INDEX_PATH.write_text(text, encoding="utf-8")
+def _ensure_bucket(path: Path) -> None:
+    """Create a record's bucket directory once per process.
 
-    # OSS mode: back up the index in sync so it can be restored after a container restart
+    There are only ``16 ** _SHARD_LEN`` buckets, so a mkdir per write is the same
+    syscall repeated thousands of times during a migration. Keyed on the real path
+    so redirecting _STORE_DIR (tests, a moved STORAGE_PATH) still creates it.
+    """
+    if path in _known_buckets:
+        return
+    path.mkdir(parents=True, exist_ok=True)
+    _known_buckets.add(path)
+
+
+def _write_record_local(item: Dict[str, Any]) -> str:
+    """Write one record to disk atomically. Returns the serialised text."""
+    path = _record_path(str(item["file_id"]))
+    _ensure_bucket(path.parent)
+    text = json.dumps(item, ensure_ascii=False)
+    # Write to a sibling then rename: a concurrent reader sees either the old
+    # record or the new one, never a half-written file.
+    tmp = path.with_name(f".{path.name}.{uuid4().hex}")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
+    return text
+
+
+def _write_record(item: Dict[str, Any]) -> None:
+    file_id = str(item["file_id"])
+    text = _write_record_local(item)
     if _storage_type() == "oss":
         try:
-            storage = _get_oss_storage()
-            storage.upload_bytes(text.encode("utf-8"), _OSS_INDEX_KEY)
-        except Exception as e:
-            logger.warning(f"Failed to backup artifact index to OSS: {e}")
+            _get_oss_storage().upload_bytes(text.encode("utf-8"), _record_oss_key(file_id))
+        except Exception as exc:  # noqa: BLE001 — the local record is authoritative
+            logger.warning("Failed to mirror artifact record %s to OSS: %s", file_id, exc)
+
+
+def migrate_legacy_index() -> int:
+    """Split a legacy monolithic ``index.json`` into per-artifact records.
+
+    Idempotent and restartable: records already on disk are left alone, and the
+    legacy file is only retired once every one of its entries has been written
+    out, so an interrupted run simply resumes. Returns the number of records
+    written. Call this off the request path — see the startup step in api/app.py.
+    """
+    legacy = _legacy_index_path()
+    if not legacy.exists():
+        return 0
+    try:
+        raw = legacy.read_text(encoding="utf-8")
+        data = json.loads(raw) if raw.strip() else {}
+    except (OSError, ValueError) as exc:
+        logger.error("Legacy artifact index unreadable, not migrating: %s", exc)
+        return 0
+    files = data.get("files") if isinstance(data, dict) else None
+    if not isinstance(files, dict):
+        logger.error("Legacy artifact index has no 'files' map, not migrating")
+        return 0
+
+    written = 0
+    for file_id, item in files.items():
+        if not isinstance(item, dict) or not file_id:
+            continue
+        if _record_path(str(file_id)).exists():
+            continue
+        item.setdefault("file_id", file_id)
+        # Local only. Mirroring here would be one OSS PUT per record — 26k serial
+        # round-trips inside the startup gate — and the legacy index is already in
+        # object storage; records re-mirror on their next write.
+        _write_record_local(item)
+        written += 1
+
+    retired = legacy.with_suffix(legacy.suffix + ".migrated")
+    legacy.replace(retired)
+    logger.info(
+        "Artifact index migrated to per-record files: %d written, %d total, legacy kept at %s",
+        written,
+        len(files),
+        retired,
+    )
+    return written
+
+
+def _has_records() -> bool:
+    return any((_STORE_DIR / _RECORDS_DIRNAME).glob("*/*.json"))
+
+
+def restore_records_from_oss() -> int:
+    """Rebuild the local record files from the OSS mirror.
+
+    For the case where the storage volume is lost but object storage survives —
+    the local-index-restored-from-OSS behaviour the monolithic index used to have.
+    Enumerates every mirrored record, so it only ever runs from :func:`prepare_records`.
+    """
+    if _storage_type() != "oss":
+        return 0
+    storage = _get_oss_storage()
+    restored = 0
+    for key in storage.list_keys(_OSS_RECORD_PREFIX):
+        file_id = Path(key).stem
+        if not file_id or _record_path(file_id).exists():
+            continue
+        try:
+            item = json.loads(storage.download_bytes(key).decode("utf-8"))
+        except Exception as exc:  # noqa: BLE001 — one bad object must not stop the restore
+            logger.warning("Skipping unreadable OSS artifact record %s: %s", key, exc)
+            continue
+        if isinstance(item, dict):
+            _write_record_local(item)
+            restored += 1
+
+    # Anything written before the split only exists in object storage as the old
+    # monolithic index; without this those artifacts would not come back.
+    try:
+        blob = storage.download_bytes(_OSS_LEGACY_INDEX_KEY)
+    except Exception:  # noqa: BLE001 — absent on installs that never had one
+        blob = None
+    if blob:
+        legacy = _legacy_index_path()
+        legacy.write_bytes(blob)
+        restored += migrate_legacy_index()
+
+    logger.info("Restored %d artifact records from OSS", restored)
+    return restored
 
 
 def _record_artifact(item: Dict[str, Any]) -> None:
-    """Add one artifact to the local index and its OSS backup."""
-    with _LOCK:
-        index = _load_index()
-        files = index.get("files")
-        if not isinstance(files, dict):
-            files = {}
-            index["files"] = files
-        files[item["file_id"]] = item
-        _save_index(index)
+    """Register one artifact. Costs one small file write, whatever the install size."""
+    _write_record(item)
 
 
 # ── Public API ──────────────────────────────────────────────────────
@@ -273,14 +402,11 @@ def save_artifact_file(
 
 def get_artifact(file_id: str) -> Optional[Dict[str, Any]]:
     """Look up artifact metadata by file_id."""
-    with _LOCK:
-        data = _load_index()
-        files = data.get("files")
-        if not isinstance(files, dict):
-            return None
-        item = files.get(file_id)
-        if not isinstance(item, dict):
-            return None
+    if not file_id:
+        return None
+    item = _read_record(file_id)
+    if item is None:
+        return None
 
     if (item.get("metadata") or {}).get("source") == "local_project_reference":
         from .local_project import resolve_project_reference
@@ -301,3 +427,18 @@ def get_artifact(file_id: str) -> Optional[Dict[str, Any]]:
     if item.get("storage_key"):
         return item
     return None
+
+
+def prepare_records() -> int:
+    """Bring the local record set up to date. Returns how many records it wrote.
+
+    Covers the two one-time situations that leave it behind: an install upgrading
+    from the monolithic ``index.json``, and an install whose storage volume was
+    lost while its OSS mirror survived. Both enumerate everything, so this runs
+    from the startup step in api/app.py and never from a request.
+    """
+    _ensure_store()
+    written = migrate_legacy_index()
+    if written or _has_records():
+        return written
+    return restore_records_from_oss()

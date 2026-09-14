@@ -10,7 +10,7 @@ import {
 import { normalizeArtifactOutput } from '../utils/fileParser';
 import { stripMcpToolPrefix } from '../utils/constants';
 import { refreshTargetForTool } from '../utils/toolRefresh';
-import { normalizeToolId as normalizeToolIdValue, resolveToolCardIndex } from '../utils/toolMatching';
+import { normalizeToolId as normalizeToolIdValue, resolveSubagentParentIndex, resolveToolCardIndex, toolCardIndexById } from '../utils/toolMatching';
 import {
   isCompactionCheckpointForRun,
   parseContextCompactionState,
@@ -240,15 +240,10 @@ function applyDesignPickEvent(chatId: string, obj: Record<string, unknown>) {
 function applySubagentEvent(toolCalls: ToolCall[], eo: Record<string, unknown>): boolean {
   const norm = (v: unknown): string => (v == null ? '' : String(v));
   const parentId = norm(eo.parent_tool_id);
-  // 事件自报父卡片工具名时按它回退（批量作业的进度贴的是 run_job，不是 call_subagent）
+  // 事件自报父卡片工具名时按它回退（批量作业的进度贴的是 run_job，不是 call_subagent）；
+  // 只有事件没带 parent_tool_id 时才轮得到名字——见 utils/toolMatching。
   const parentName = norm(eo.parent_tool_name) || 'call_subagent';
-  let idx = -1;
-  if (parentId) idx = toolCalls.findIndex((t) => norm(t?.id) === parentId);
-  if (idx < 0) {
-    for (let i = toolCalls.length - 1; i >= 0; i--) {
-      if (toolCalls[i]?.name === parentName) { idx = i; break; }
-    }
-  }
+  const idx = resolveSubagentParentIndex(toolCalls, parentId || undefined, parentName);
   if (idx < 0) return false;
 
   // ── 批量作业进度：贴在 run_job 卡片头上的一行实时数字，不产生子步骤 ──
@@ -636,12 +631,16 @@ export async function processChatStream(resp: Response, opts: ChatStreamOptions)
       fallbackToAnyRunning: true,
     });
 
-  const finalizeRunningTools = (status: 'success' | 'error' = 'success') => {
+  // 流收尾时还在转圈的卡 = 这次调用的结果始终没到（被中止，或结果带着一个对不上
+  // 任何卡片的 id 回来了）。标成 success 等于替它宣布成功：卡片看着正常、只是没有
+  // 输出，异常就此隐形。标 interrupted 才是实话，也和 utils/subagentView 里
+  // 「没在流里还停在 running 就是中断」的判定一致。
+  const finalizeRunningTools = () => {
     let changed = false;
     toolCalls = toolCalls.map((tool) => {
       if (tool.status !== 'running') return tool;
       changed = true;
-      return { ...tool, status };
+      return { ...tool, status: 'interrupted' };
     });
     return changed;
   };
@@ -1183,9 +1182,7 @@ export async function processChatStream(resp: Response, opts: ChatStreamOptions)
           const revision = ensureOntologyRevision();
           revision.toolPending = false;
           const eventToolId = getEventToolId(eventObj);
-          const existingIndex = eventToolId
-            ? revision.toolCalls.findIndex((tool) => normalizeToolId(tool.id) === eventToolId)
-            : -1;
+          const existingIndex = eventToolId ? toolCardIndexById(revision.toolCalls, eventToolId) : -1;
           const toolInput = eventObj.input ?? eventObj.args ?? eventObj.tool_args ?? eventObj.arguments;
           const rawName = getEventToolRawName(eventObj) || t('工具调用');
           const displayName = getEventToolDisplayName(eventObj);
@@ -1215,9 +1212,7 @@ export async function processChatStream(resp: Response, opts: ChatStreamOptions)
           revision.toolPending = false;
           const eventToolId = getEventToolId(eventObj);
           const delta = typeof eventObj.arguments_delta === 'string' ? eventObj.arguments_delta : '';
-          const index = eventToolId
-            ? revision.toolCalls.findIndex((tool) => normalizeToolId(tool.id) === eventToolId)
-            : -1;
+          const index = eventToolId ? toolCardIndexById(revision.toolCalls, eventToolId) : -1;
           if (index < 0) {
             revision.toolCalls = [...revision.toolCalls, {
               id: eventToolId || `ontology_tool_${Date.now()}_${revision.toolCalls.length}`,
@@ -1283,7 +1278,7 @@ export async function processChatStream(resp: Response, opts: ChatStreamOptions)
 
         if (eventType === 'tool_use' || eventType === 'tool_call_start' || eventType === 'tool_call' || eventType === 'tool_start') {
           const eventToolId = getEventToolId(eventObj);
-          const existingIndex = eventToolId ? toolCalls.findIndex((tool) => normalizeToolId(tool.id) === eventToolId) : -1;
+          const existingIndex = eventToolId ? toolCardIndexById(toolCalls, eventToolId) : -1;
           const toolInput = eventObj.input ?? eventObj.args ?? eventObj.tool_args ?? eventObj.arguments;
           const rawName = getEventToolRawName(eventObj);
           const displayName = getEventToolDisplayName(eventObj);
@@ -1323,9 +1318,7 @@ export async function processChatStream(resp: Response, opts: ChatStreamOptions)
         if (eventType === 'tool_call_delta') {
           const eventToolId = getEventToolId(eventObj);
           const delta = typeof eventObj.arguments_delta === 'string' ? eventObj.arguments_delta : '';
-          const index = eventToolId
-            ? toolCalls.findIndex((tool) => normalizeToolId(tool.id) === eventToolId)
-            : -1;
+          const index = eventToolId ? toolCardIndexById(toolCalls, eventToolId) : -1;
           if (index < 0) {
             toolCalls.push({
               id: eventToolId || `tool_${Date.now()}_${toolCalls.length}`,

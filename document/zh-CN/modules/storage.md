@@ -83,7 +83,8 @@ OSS_PRESIGNED_URL_EXPIRY=900
 MCP 工具产出的文件（报表、图表、文档等）走 `src/backend/core/artifacts/store.py`，是协议层之上的一个轻量产物仓：
 
 - **双模式**：`STORAGE_TYPE=local` 时字节写 `{STORAGE_PATH:-result}/artifacts/`；`oss` 时上传 OSS、本地只留索引条目；
-- **JSON 索引**：`{base}/artifacts/index.json` 维护 `file_id → 元数据` 映射；OSS 模式下索引还会备份到 OSS（key `artifacts/_index.json`），容器重启后自动恢复；
+- **一条记录一个文件**：元数据存在 `{base}/artifacts/records/<前两位>/<file_id>.json`，登记与查询都只碰这一个小文件，代价不随装机规模增长；OSS 模式下每条记录同时镜像到 `artifacts/_records/<前两位>/<file_id>.json`，本地卷丢失时用 `core.artifacts.store.restore_records_from_oss()` 重建（维护操作，不在请求路径上）；
+- **历史索引迁移**：旧版把全部记录放在单个 `{base}/artifacts/index.json` 里，新增一个文件要重写并重传整份索引、每次查询要重新解析整份。后端启动时会自动把它拆成上述单条记录文件（一次性、可重入），拆完原文件改名为 `index.json.migrated` 留档；
 - **SVG 自动适配**：保存 SVG 时自动扩展 viewBox（`core/content/svg_fit.py`），防止模型产出的图被裁切；
 - 注意：该索引仓的云分支目前只识别 `oss`，`STORAGE_TYPE=s3` 时 artifact 产物按本地模式落盘（通用存储协议层不受影响）。
 

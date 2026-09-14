@@ -83,7 +83,8 @@ OSS_PRESIGNED_URL_EXPIRY=900
 Files produced by MCP tools (reports, charts, documents, …) go through `src/backend/core/artifacts/store.py`, a lightweight artifact repository layered on top of the protocol:
 
 - **Dual mode**: with `STORAGE_TYPE=local`, bytes land in `{STORAGE_PATH:-result}/artifacts/`; with `oss`, they are uploaded to OSS and only an index entry is kept locally;
-- **JSON index**: `{base}/artifacts/index.json` maps `file_id → metadata`; in OSS mode the index is also backed up to OSS (key `artifacts/_index.json`) and restored automatically after container restarts;
+- **One file per record**: metadata lives at `{base}/artifacts/records/<first-two>/<file_id>.json`, so registering and looking up an artifact each touch a single small file and cost the same no matter how large the install grows; in OSS mode every record is mirrored to `artifacts/_records/<first-two>/<file_id>.json`, and a lost local volume is rebuilt with `core.artifacts.store.restore_records_from_oss()` (a maintenance operation, never a request path);
+- **Legacy index migration**: older installs kept every record in a single `{base}/artifacts/index.json`, so adding one artifact rewrote and re-uploaded the whole index and every lookup re-parsed it. The backend splits that file into the per-record files above on startup (one-time and restartable), renaming the original to `index.json.migrated` for reference;
 - **SVG auto-fit**: saved SVGs get their viewBox expanded automatically (`core/content/svg_fit.py`) so model-generated diagrams are never clipped;
 - Note: this index repository's cloud branch only recognizes `oss`; under `STORAGE_TYPE=s3`, artifact outputs fall back to local-mode persistence (the generic storage protocol layer is unaffected).
 

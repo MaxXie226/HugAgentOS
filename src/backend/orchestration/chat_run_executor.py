@@ -128,6 +128,16 @@ _WORKER_INSTANCE_ID = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:
 # SQLite and every commit is a disk flush on the machine the user waits at.
 _OFFSET_RESERVATION = 64
 
+# How long a streaming run may go without re-asking the shared journal whether
+# it is still supposed to be running. Two things ask — the ownership proof
+# behind an emitted event, and the cancellation poll that covers the stretches
+# between events, when a tool is running and nothing is being emitted — and both
+# are answering the same question: somebody pressed stop, possibly in another
+# worker process. One cadence, so the two cannot drift into disagreeing about
+# how fast a stop button responds. A quarter second sits under the threshold
+# where interface response stops feeling instant.
+_CANCEL_VISIBILITY_SEC = 0.25
+
 
 async def _aiter_with_inactivity_timeout(
     aiter: AsyncIterator[Any],
@@ -258,39 +268,90 @@ class _EventOffsets:
     the journal is SQLite and the person is watching the answer appear.
 
     The two are separable. Offsets come from reservations the journal hands out
-    in runs, and this keeps the unused remainder. Ownership is still proven for
-    every single event, but by reading the lease rather than writing to it, so
-    an evicted worker stops exactly where it stopped before. Both calls run off
-    the event loop that is delivering the stream.
+    in runs, and this keeps the unused remainder. Ownership is proven by reading
+    the lease rather than writing to it, and on a bounded schedule rather than
+    once per event: measured in the deployment that read costs ~0.5 ms, which at
+    forty concurrent streams is a whole core spent asking a question whose
+    answer almost never changes.
+
+    Ownership can stop being ours two ways, and the bound is sized against the
+    slower one:
+
+    * This process notices itself — its own heartbeat fails to renew, or the
+      user cancelled here. ``lease_lost`` is set, and the very next event is
+      fenced without leaving the loop at all, so this path got *faster*, not
+      looser.
+    * Another worker decided it — a cancel that landed on a different process,
+      or a recovery that re-claimed this run. That can only arrive through the
+      shared journal, so the read cannot be dropped, only bounded: at most one
+      per ``_CANCEL_VISIBILITY_SEC``, the same cadence the chunk loop already
+      polls cancellation on. Re-claiming requires the lease to have *expired*,
+      which means this worker went a full lease without renewing — it was not
+      emitting during that stretch either — so the window where a fenced worker
+      could still append is bounded by a quarter second and reached only by a
+      process that had stopped producing anyway.
 
     A terminal event is allocated on its own: it has to sit after every live
-    offset, including the ones a reservation left unused.
+    offset, including the ones a reservation left unused. That allocation is an
+    owned write, so a run always fences hard on the way out.
     """
 
-    def __init__(self, journal: RunJournal, run_id: str, owner: str):
+    def __init__(
+        self,
+        journal: RunJournal,
+        run_id: str,
+        owner: str,
+        *,
+        lease_lost: asyncio.Event,
+    ):
         self._journal = journal
         self._run_id = run_id
         self._owner = owner
         self._next = 0
         self._remaining = 0
+        self._lease_lost = lease_lost
+        self._proven_at = 0.0
+        # The offset most recently handed out. Callers persist it with their
+        # checkpoints so a reconnecting follower knows where the run had got to.
+        self.last = 0
 
     async def take(self, *, terminal: bool = False) -> int:
         if terminal:
             self._remaining = 0
-            return await asyncio.to_thread(
+            self.last = await asyncio.to_thread(
                 self._journal.allocate_event_offset, self._run_id, terminal=True
             )
+            return self.last
         if self._remaining == 0:
+            # A reservation is an owned write: it fences on its own, and more
+            # strongly than a read does.
             self._next = await asyncio.to_thread(self._reserve)
             self._remaining = _OFFSET_RESERVATION
+            self._proven_at = time.monotonic()
         else:
-            await asyncio.to_thread(
-                self._journal.require_lease, self._run_id, self._owner
-            )
+            await self._prove_ownership()
         offset = self._next
         self._next += 1
         self._remaining -= 1
+        self.last = offset
         return offset
+
+    async def _prove_ownership(self) -> None:
+        """Raise ``RunLeaseLost`` unless this worker still owns the run."""
+        if self._lease_lost.is_set():
+            # Our own heartbeat already decided this; the journal cannot
+            # disagree, so there is nothing to go and ask.
+            raise RunLeaseLost(self._run_id)
+        now = time.monotonic()
+        if now - self._proven_at < _CANCEL_VISIBILITY_SEC:
+            return
+        await asyncio.to_thread(self._journal.require_lease, self._run_id, self._owner)
+        self._proven_at = now
+
+    async def emit(self, event: Dict[str, Any], *, terminal: bool = False) -> None:
+        """Allocate this event's offset and append it to the run's log."""
+        await self.take(terminal=terminal)
+        await _xadd_event(self._run_id, self.last, event)
 
     def _reserve(self) -> int:
         return self._journal.allocate_event_offset(
@@ -1027,13 +1088,9 @@ async def _run_workflow(
     # 本轮回答总耗时起点 —— 持久化进 extra_data.duration_ms，历史加载后「用时」不再消失
     _run_started_monotonic = time.monotonic()
 
-    offset_counter = 0
-    offsets = _EventOffsets(journal, run_id, owner)
+    offsets = _EventOffsets(journal, run_id, owner, lease_lost=lease_lost)
 
-    async def _emit(event: Dict[str, Any], *, terminal: bool = False) -> None:
-        nonlocal offset_counter
-        offset_counter = await offsets.take(terminal=terminal)
-        await _xadd_event(run_id, offset_counter, event)
+    _emit = offsets.emit
 
     async def _pause_for_tool_outcome(exc: BaseException) -> bool:
         logger.warning("chat_run_tool_outcome_unknown", run_id=run_id, effect_id=str(exc))
@@ -1185,7 +1242,7 @@ async def _run_workflow(
             return True
         async with _flush_lock:
             # Canonical steps can advance without a user-visible SSE event.
-            snapshot_key = (current_message_id, offset_counter, len(_model_steps))
+            snapshot_key = (current_message_id, offsets.last, len(_model_steps))
             if snapshot_key == _flushed_snapshot_key:
                 return True
             # Tool results go in at history size; the read path bounds them the
@@ -1196,15 +1253,17 @@ async def _run_workflow(
                     "thinking": _thinking_payload(),
                     "model_steps": _model_steps_payload(),
                     "tool_calls": [
-                        {**tc, "result": bound_result_for_history(tc["result"])[0]}
-                        if "result" in tc
-                        else tc
+                        (
+                            {**tc, "result": bound_result_for_history(tc["result"])[0]}
+                            if "result" in tc
+                            else tc
+                        )
                         for tc in tool_calls_log
                     ]
                     or None,
                     "segments": _segments.snapshot(),
                     "message_id": current_message_id,
-                    "event_offset": offset_counter,
+                    "event_offset": offsets.last,
                 }
             )
             try:
@@ -1381,7 +1440,7 @@ async def _run_workflow(
         ):
             now = time.monotonic()
             if now >= next_cancel_poll:
-                next_cancel_poll = now + 0.25
+                next_cancel_poll = now + _CANCEL_VISIBILITY_SEC
                 if is_run_cancelled(run_id):
                     raise asyncio.CancelledError
             chunk_type = chunk.get("type")
@@ -1945,7 +2004,7 @@ async def _run_workflow(
                         owner=owner,
                         status="completed",
                         usage=usage_payload,
-                        last_event_offset=offset_counter,
+                        last_event_offset=offsets.last,
                         commit_effect=_commit_output,
                         committed_operation={
                             "operation_type": "message_committed",
@@ -2101,6 +2160,7 @@ async def _run_workflow(
             user_facing = resolve_user_facing_error(exc)
         except Exception:
             user_facing = "请求处理失败，请稍后重试"
+
         def _commit_failed_output(db) -> None:
             # Whatever the turn produced before failing stays in the row, with
             # the error beside it. Runs in the failed-terminal transaction so a
@@ -2129,7 +2189,7 @@ async def _run_workflow(
             owner=owner,
             status="failed",
             failure_reason=str(exc)[:1000],
-            last_event_offset=offset_counter,
+            last_event_offset=offsets.last,
             commit_effect=_commit_failed_output,
         )
         if not failed:
@@ -2352,9 +2412,7 @@ async def follow_run(run_id: str, *, from_offset: int = 0) -> AsyncIterator[Dict
     # ── Phase 2: blocking tail ──
     while True:
         try:
-            batch = await events.wait(
-                run_id, after=cursor, limit=100, timeout_ms=_XREAD_BLOCK_MS
-            )
+            batch = await events.wait(run_id, after=cursor, limit=100, timeout_ms=_XREAD_BLOCK_MS)
         except RedisTimeoutError:
             # Benign: the block window elapsed with no new events — semantically
             # identical to an empty result. (redis-py 8.0 defaults socket_timeout
@@ -2528,13 +2586,9 @@ async def _run_plan_execute_workflow(
         name=f"plan_run_lease:{run_id}",
     )
 
-    offset_counter = 0
-    offsets = _EventOffsets(journal, run_id, owner)
+    offsets = _EventOffsets(journal, run_id, owner, lease_lost=lease_lost)
 
-    async def _emit(event: Dict[str, Any], *, terminal: bool = False) -> None:
-        nonlocal offset_counter
-        offset_counter = await offsets.take(terminal=terminal)
-        await _xadd_event(run_id, offset_counter, event)
+    _emit = offsets.emit
 
     async def _pause_plan_tool_outcome(exc: BaseException) -> None:
         if not journal.needs_attention(
@@ -2709,7 +2763,7 @@ async def _run_plan_execute_workflow(
             owner=owner,
             status="completed",
             usage=exec_usage,
-            last_event_offset=offset_counter,
+            last_event_offset=offsets.last,
             commit_effect=_commit_plan_result,
             committed_operation={
                 "operation_type": "message_committed",
@@ -2739,7 +2793,7 @@ async def _run_plan_execute_workflow(
             owner=owner,
             status="cancelled",
             failure_reason="plan worker cancelled",
-            last_event_offset=offset_counter,
+            last_event_offset=offsets.last,
         ):
             logger.info("plan_run_cancelled", run_id=run_id)
             await _emit(
@@ -2767,7 +2821,7 @@ async def _run_plan_execute_workflow(
             owner=owner,
             status="failed",
             failure_reason=str(exc)[:1000],
-            last_event_offset=offset_counter,
+            last_event_offset=offsets.last,
         )
         if failed:
             await _emit(
@@ -2989,7 +3043,6 @@ async def _run_autonomous_loop_workflow(
         _lease_heartbeat(run_id, owner, current, lease_lost),
         name=f"autonomous_loop_lease:{run_id}",
     )
-    offset_counter = 0
     # Accumulate the worker's streamed body text + tool cards, and persist them
     # as an assistant message when the stream ends — exactly the same as a
     # normal conversation: the body only accumulates content deltas (thinking
@@ -3001,11 +3054,10 @@ async def _run_autonomous_loop_workflow(
     tool_log: List[Dict[str, Any]] = []
     tool_idx: Dict[str, int] = {}
 
-    offsets = _EventOffsets(journal, run_id, owner)
+    offsets = _EventOffsets(journal, run_id, owner, lease_lost=lease_lost)
 
     async def _emit(event: Dict[str, Any], *, terminal: bool = False) -> None:
-        nonlocal offset_counter
-        offset_counter = await offsets.take(terminal=terminal)
+        await offsets.take(terminal=terminal)
         et = event.get("type")
         if et == "content":
             _delta = event.get("delta")
@@ -3027,7 +3079,7 @@ async def _run_autonomous_loop_workflow(
             if _i is not None:
                 tool_log[_i]["output"] = event.get("result")
                 tool_log[_i]["status"] = "error" if event.get("error") else "success"
-        await _xadd_event(run_id, offset_counter, event)
+        await _xadd_event(run_id, offsets.last, event)
         # At structural checkpoints (requirement flipped / per-iteration
         # evaluation done) persist progress incrementally — so after a mid-run
         # crash/restart/refresh the already-produced body + tool cards are still
@@ -3342,7 +3394,7 @@ async def _run_autonomous_loop_workflow(
             owner=owner,
             status=run_status,
             usage={"total_tokens": result.tokens_spent},
-            last_event_offset=offset_counter,
+            last_event_offset=offsets.last,
             commit_effect=_commit_loop_result,
             committed_operation={
                 "operation_type": "loop_result_committed",
@@ -3371,7 +3423,7 @@ async def _run_autonomous_loop_workflow(
                 owner=owner,
                 status="cancelled",
                 failure_reason="autonomous loop worker cancelled",
-                last_event_offset=offset_counter,
+                last_event_offset=offsets.last,
                 commit_effect=partial_effect,
                 committed_operation=(
                     {
@@ -3418,7 +3470,7 @@ async def _run_autonomous_loop_workflow(
             owner=owner,
             status="failed",
             failure_reason=str(exc)[:1000],
-            last_event_offset=offset_counter,
+            last_event_offset=offsets.last,
             commit_effect=partial_effect,
             committed_operation=(
                 {
@@ -3562,13 +3614,9 @@ async def _run_plan_generate_workflow(
         _lease_heartbeat(run_id, owner, worker_task, lease_lost),
         name=f"plan_generate_lease:{run_id}",
     )
-    offset_counter = 0
-    offsets = _EventOffsets(journal, run_id, owner)
+    offsets = _EventOffsets(journal, run_id, owner, lease_lost=lease_lost)
 
-    async def _emit(event: Dict[str, Any], *, terminal: bool = False) -> None:
-        nonlocal offset_counter
-        offset_counter = await offsets.take(terminal=terminal)
-        await _xadd_event(run_id, offset_counter, event)
+    _emit = offsets.emit
 
     plan_id_out: Optional[str] = None
     plan_title = ""
@@ -3689,7 +3737,7 @@ async def _run_plan_generate_workflow(
             owner=owner,
             status="completed",
             usage=gen_usage,
-            last_event_offset=offset_counter,
+            last_event_offset=offsets.last,
             commit_effect=_commit_plan_preview,
             committed_operation={
                 "operation_type": "message_committed",
@@ -3712,7 +3760,7 @@ async def _run_plan_generate_workflow(
                 owner=owner,
                 status="cancelled",
                 failure_reason="plan generation worker cancelled",
-                last_event_offset=offset_counter,
+                last_event_offset=offsets.last,
             )
             current = get_run(run_id)
             if cancelled or (current is not None and current.status == "cancelled"):
@@ -3760,7 +3808,7 @@ async def _run_plan_generate_workflow(
             owner=owner,
             status="failed",
             failure_reason=str(exc)[:1000],
-            last_event_offset=offset_counter,
+            last_event_offset=offsets.last,
         )
         if failed:
             await _emit(
@@ -3865,8 +3913,12 @@ async def recover_orphan_runs() -> int:
         ]
     for run_id, chat_id in local_channel_runs:
         if _journal().cancel(run_id, reason="desktop channel lease cannot survive process restart"):
-            await _write_terminal_to_stream(run_id, chat_id=chat_id,
-                error_text="本机机器人执行已中断，请检查结果后从渠道重新发起", cancelled=True)
+            await _write_terminal_to_stream(
+                run_id,
+                chat_id=chat_id,
+                error_text="本机机器人执行已中断，请检查结果后从渠道重新发起",
+                cancelled=True,
+            )
     effect_decisions = await recover_incomplete_tool_effects(
         journal=ToolEffectJournal(SessionLocal)
     )
@@ -3923,8 +3975,11 @@ async def recover_orphan_runs() -> int:
                 chat_id=decision.chat_id or "",
                 error_text="服务重启发生在任务准备完成前，请重新发起",
             )
-    recovered_count = len({item.run_id for item in decisions} | effect_attention_runs
-        | {run_id for run_id, _ in local_channel_runs})
+    recovered_count = len(
+        {item.run_id for item in decisions}
+        | effect_attention_runs
+        | {run_id for run_id, _ in local_channel_runs}
+    )
     if recovered_count:
         logger.info("chat_run_orphan_recovered", count=recovered_count)
     return recovered_count
@@ -4421,9 +4476,7 @@ async def run_stale_reaper_loop() -> None:
                 await reap_stale_runs()
                 from core.services.tool_effect_ledger import ToolEffectJournal
 
-                pruned = await asyncio.to_thread(
-                    ToolEffectJournal(SessionLocal).prune_settled
-                )
+                pruned = await asyncio.to_thread(ToolEffectJournal(SessionLocal).prune_settled)
                 if pruned:
                     logger.info("tool_effect_ledger_pruned", count=pruned)
                 next_reap_at = loop.time() + _STALE_REAPER_INTERVAL_SEC
@@ -4555,7 +4608,9 @@ async def follow_run_as_sse(
                 yield f"data: {json.dumps(factory('run not found'), ensure_ascii=False)}\n\n"
                 break
             elif kind == "error":
-                logger.warning("follow_run_as_sse_failed", run_id=run_id, error=str(payload), exc_info=payload)
+                logger.warning(
+                    "follow_run_as_sse_failed", run_id=run_id, error=str(payload), exc_info=payload
+                )
                 yield f"data: {json.dumps(factory('流式响应中断'), ensure_ascii=False)}\n\n"
                 break
     finally:

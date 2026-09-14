@@ -244,11 +244,17 @@ export function parseHistoryMessage(m: any): ChatMessage {
         ),
         input: tc.tool_args ?? tc.arguments ?? tc.input,
         output: tc.result ?? tc.output,
+        // 既没有 status 也没有 result 的条目 = 这次调用的结果从来没落库。以前一律
+        // 当成功读回来，于是"结果丢了"在历史里长得和"成功但没输出"一模一样；
+        // 照实标成中断，异常才看得见。（老历史里结果在、只是没写 status 的条目
+        // 仍然算成功。）
         status: (tc.status === 'error'
           ? 'error'
           : tc.status === 'interrupted'
             ? 'interrupted'
-            : 'success') as 'success' | 'error' | 'interrupted',
+            : !tc.status && (tc.result ?? tc.output) === undefined
+              ? 'interrupted'
+              : 'success') as 'success' | 'error' | 'interrupted',
         // 后端把开始时刻与耗时一并落库，历史因此能还原出这次调用真实占了多久；
         // 拿不到就不给值，让卡片不显示耗时，而不是拿"这张卡刚画出来"当起点。
         timestamp: typeof tc.started_at === 'number' ? tc.started_at : tc.timestamp,

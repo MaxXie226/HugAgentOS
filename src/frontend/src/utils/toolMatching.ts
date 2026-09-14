@@ -22,6 +22,23 @@ export interface ToolCardLike {
   status?: string;
 }
 
+/**
+ * 按 id 找卡片；同一个 id 有多张时认还没收口的那张。
+ *
+ * 按响应重新编号的网关会让 `call_0` 既指上一轮已经跑完的调用，也指这一轮正在跑的
+ * 调用。认第一张的话，第二次调用会把第一次的参数和输出整个盖掉——一整次调用就这么
+ * 没了。后端 `core/chat/tool_log.py::upsert_tool_call` 是同一套规矩。
+ */
+export function toolCardIndexById(cards: ToolCardLike[], toolId: string): number {
+  let settled = -1;
+  for (let i = 0; i < cards.length; i++) {
+    if (normalizeToolId(cards[i].id) !== toolId) continue;
+    if (cards[i].status === 'running' || cards[i].status === 'pending') return i;
+    if (settled < 0) settled = i;
+  }
+  return settled;
+}
+
 export function lastRunningToolIndex(cards: ToolCardLike[], name?: string): number {
   for (let i = cards.length - 1; i >= 0; i--) {
     if (cards[i].status !== 'running') continue;
@@ -39,11 +56,36 @@ export function resolveToolCardIndex(
 ): number {
   if (eventToolId) {
     // 带 id 就以 id 为准；找不到就是找不到，不再往下猜。
-    return cards.findIndex((card) => normalizeToolId(card.id) === eventToolId);
+    return toolCardIndexById(cards, eventToolId);
   }
   if (eventToolName) {
     const byName = lastRunningToolIndex(cards, eventToolName);
     if (byName >= 0) return byName;
   }
   return options.fallbackToAnyRunning ? lastRunningToolIndex(cards) : -1;
+}
+
+/**
+ * 把一条 subagent_event 归到它所属的父工具卡（`call_subagent` / `run_job`）上。
+ *
+ * 和上面同一条规矩：事件报了 parent_tool_id 就只认这个 id。并行调多个子智能体时，
+ * 「最后一张 call_subagent 卡」同时对应好几个还在跑的子智能体，按名字认领会把 A 的
+ * 思考和子工具塞进 B 的卡里。认不到就返回 -1，调用方直接丢弃这条事件。
+ *
+ * 名字兜底只留给**完全没带 parent_tool_id** 的事件：批量作业的 job_progress 在拿不到
+ * CURRENT_TOOL_CALL_ID 时就是这种形状，它除了 `run_job` 这个名字没有别的线索。
+ */
+export function resolveSubagentParentIndex(
+  cards: ToolCardLike[],
+  parentToolId: string | undefined,
+  parentToolName: string,
+): number {
+  if (parentToolId) {
+    // 子步骤是父调用还在跑的时候冒出来的 → 同 id 认未收口的那张（同 toolCardIndexById）。
+    return toolCardIndexById(cards, parentToolId);
+  }
+  for (let i = cards.length - 1; i >= 0; i--) {
+    if (cards[i]?.name === parentToolName) return i;
+  }
+  return -1;
 }

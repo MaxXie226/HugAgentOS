@@ -29,6 +29,8 @@ from agentscope.message import Msg
 from agentscope.model import ChatModelBase, ChatResponse
 from agentscope.tool._types import ToolChoice
 
+from core.llm.tool_call_identity import ToolCallIdentityMixin
+
 logger = logging.getLogger(__name__)
 
 # How long a provider stays deprioritised after reporting itself unusable.
@@ -83,13 +85,18 @@ def provider_is_unusable(exc: BaseException) -> bool:
     return type(exc) is openai.APIError
 
 
-class FailoverChatModel(ChatModelBase):
+class FailoverChatModel(ToolCallIdentityMixin, ChatModelBase):
     """Presents a candidate chain as one model, switching on an unusable provider.
 
     Subclasses ``ChatModelBase`` and overrides ``_call_api`` rather than
     wrapping ``__call__``: usage instrumentation installs itself on
     ``_call_api``, so one logical model call stays one recorded attempt however
     many endpoints it took to answer.
+
+    ``ToolCallIdentityMixin`` has to be worn here as well: candidates are
+    entered through ``candidate._call_api``, which walks past their own
+    ``__call__`` and therefore past the mixin they carry. Whichever endpoint of
+    the chain answers, its tool-call ids are repaired on the way out.
 
     Fallback candidates are built on first use. A healthy primary — the normal
     case — never constructs the rest of the chain.

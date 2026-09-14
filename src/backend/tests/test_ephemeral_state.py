@@ -36,6 +36,32 @@ async def test_put_get_roundtrip(state):
 
 
 @pytest.mark.asyncio
+async def test_hold_takes_a_free_mutex_and_extends_its_own(state):
+    assert await state.hold("role", "worker-a", ttl=60) is True
+    # Renewing is the same call: the holder says "still me" and keeps it.
+    assert await state.hold("role", "worker-a", ttl=60) is True
+
+
+@pytest.mark.asyncio
+async def test_hold_refuses_a_mutex_another_token_owns(state):
+    await state.hold("role", "worker-a", ttl=60)
+
+    assert await state.hold("role", "worker-b", ttl=60) is False
+    # The loser must not have extended or stolen it on the way past.
+    assert await state.hold("role", "worker-a", ttl=60) is True
+
+
+@pytest.mark.asyncio
+async def test_hold_moves_the_mutex_once_it_lapses(state):
+    """A leader that stops renewing hands its role to the next process."""
+    await state.hold("role", "worker-a", ttl=1)
+    await asyncio.sleep(1.05)
+
+    assert await state.hold("role", "worker-b", ttl=60) is True
+    assert await state.hold("role", "worker-a", ttl=60) is False
+
+
+@pytest.mark.asyncio
 async def test_take_reads_once(state):
     """One-shot handoffs (login tickets, steer notes) must not be redeemable twice."""
     await state.put("ticket", "payload", ttl=60)

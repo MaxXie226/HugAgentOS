@@ -43,6 +43,7 @@ from agentscope.model import (
 from agentscope.tool._types import ToolChoice
 
 from core.llm.reasoning_replay import ReasoningReplayMixin
+from core.llm.tool_call_identity import ToolCallIdentityMixin
 from core.llm.tool_result_media import InlineToolMediaMixin, NoDiskToolMediaMixin
 
 from ._fallback import StructuredFallbackMixin
@@ -95,22 +96,26 @@ def _with_provider(model_instance, provider_id: str):  # noqa: ANN001, ANN202
 
 # ── Native vendor thin subclasses ─────────────────────────────────────────────
 class NativeAnthropicChatModel(
-    ImageTokenCountingMixin, StructuredFallbackMixin, AnthropicChatModel
+    ToolCallIdentityMixin, ImageTokenCountingMixin, StructuredFallbackMixin, AnthropicChatModel
 ):
     pass
 
 
-class NativeGeminiChatModel(ImageTokenCountingMixin, StructuredFallbackMixin, GeminiChatModel):
+class NativeGeminiChatModel(
+    ToolCallIdentityMixin, ImageTokenCountingMixin, StructuredFallbackMixin, GeminiChatModel
+):
     pass
 
 
 class NativeDashScopeChatModel(
-    ImageTokenCountingMixin, StructuredFallbackMixin, DashScopeChatModel
+    ToolCallIdentityMixin, ImageTokenCountingMixin, StructuredFallbackMixin, DashScopeChatModel
 ):
     pass
 
 
-class NativeOllamaChatModel(ImageTokenCountingMixin, StructuredFallbackMixin, OllamaChatModel):
+class NativeOllamaChatModel(
+    ToolCallIdentityMixin, ImageTokenCountingMixin, StructuredFallbackMixin, OllamaChatModel
+):
     pass
 
 
@@ -199,7 +204,9 @@ def build_native_model(
 
 
 # ── litellm adapter ───────────────────────────────────────────────────────────
-class LiteLLMChatModel(ImageTokenCountingMixin, StructuredFallbackMixin, OpenAIChatModel):
+class LiteLLMChatModel(
+    ToolCallIdentityMixin, ImageTokenCountingMixin, StructuredFallbackMixin, OpenAIChatModel
+):
     """Call any vendor via litellm; reuse OpenAIChatModel's OpenAI-format parser.
 
     litellm normalizes all vendor responses into OpenAI format (including streaming chunks), so

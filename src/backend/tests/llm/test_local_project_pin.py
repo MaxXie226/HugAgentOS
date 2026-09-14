@@ -28,7 +28,6 @@ def local_project(tmp_path, db_session, monkeypatch):
     from core.artifacts import store
 
     monkeypatch.setattr(store, "_STORE_DIR", tmp_path / "artifacts")
-    monkeypatch.setattr(store, "_INDEX_PATH", tmp_path / "artifacts" / "index.json")
     monkeypatch.setattr("core.db.engine.SessionLocal", sessionmaker(bind=db_session.get_bind()))
     root = tmp_path / "project"
     root.mkdir()

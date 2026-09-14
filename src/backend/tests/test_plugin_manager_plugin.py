@@ -48,7 +48,6 @@ def pm_env(tmp_path, monkeypatch):
     art_dir = tmp_path / "artifacts"
     art_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(store, "_STORE_DIR", art_dir)
-    monkeypatch.setattr(store, "_INDEX_PATH", art_dir / "index.json")
 
     import core.auth.capabilities as caps
 

@@ -40,13 +40,12 @@ def sm_env(tmp_path, monkeypatch):
     # The impl lazily reads the attribute via `from core.db.engine import SessionLocal` → patching here suffices
     monkeypatch.setattr(dbe, "SessionLocal", TestSession)
 
-    # Artifact store goes to tmp (the store's _STORE_DIR/_INDEX_PATH are fixed at import time; patch globally)
+    # Artifact store goes to tmp (_STORE_DIR is fixed at import time; every other path derives from it)
     from core.artifacts import store
 
     art_dir = tmp_path / "artifacts"
     art_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(store, "_STORE_DIR", art_dir)
-    monkeypatch.setattr(store, "_INDEX_PATH", art_dir / "index.json")
 
     # Allow the capabilities (otherwise all write verbs get blocked)
     import core.auth.capabilities as caps

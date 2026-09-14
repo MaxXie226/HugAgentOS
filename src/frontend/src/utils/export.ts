@@ -1,5 +1,4 @@
 import type { ChatMessage } from '../types';
-import html2pdf from 'html2pdf.js';
 import { formatDateKey, formatTime } from './date';
 import { mdToHtml } from './markdown';
 import { t } from '../i18n';
@@ -89,8 +88,20 @@ function buildChatExportHtml(chatTitle: string, messages: ChatMessage[]): string
 }
 /* dark-ok-end */
 
-export function triggerPdfDownload(filename: string, chatTitle: string, messages: ChatMessage[], chatTimestamp?: number): void {
+// html2pdf drags in jsPDF and html2canvas, and none of the three is touched
+// until someone exports a conversation to PDF. Imported statically they sat in
+// the first-load bundle of every visit.
+//
+// The import is started *before* buildChatExportHtml, not after: that call runs
+// marked + highlight.js over every message in the conversation, so on a long
+// chat the download would otherwise wait behind hundreds of ms of synchronous
+// work it has nothing to do with. The off-screen container is still attached
+// immediately before the capture reads it, so it never becomes visible while
+// the module is on the wire.
+export async function triggerPdfDownload(filename: string, chatTitle: string, messages: ChatMessage[], chatTimestamp?: number): Promise<void> {
+  const loading = import('html2pdf.js');
   const htmlContent = buildChatExportHtml(chatTitle, messages);
+  const { default: html2pdf } = await loading;
   const container = document.createElement('div');
   container.innerHTML = htmlContent;
   document.body.appendChild(container);

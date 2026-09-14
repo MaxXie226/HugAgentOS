@@ -50,6 +50,11 @@ function univerHyphenationTrim(): PluginOption {
   }
 }
 
+const REACT_RUNTIME = /[\\/]node_modules[\\/](react|react-dom|scheduler)[\\/]/
+// antd ships its own components and the rc-* primitives they are built on; the
+// two version together and are one cache unit.
+const ANT_DESIGN = /[\\/]node_modules[\\/](antd|@ant-design[\\/][^\\/]+|rc-[^\\/]+)[\\/]/
+
 // https://vite.dev/config/
 export default defineConfig(({ mode }) => {
   const repoRoot = path.resolve(__dirname, '../..')
@@ -59,6 +64,27 @@ export default defineConfig(({ mode }) => {
   const proxyTarget = `http://localhost:${backendPort}`
 
   return {
+    build: {
+      rollupOptions: {
+        output: {
+          // 这几个包的版本远比业务代码稳定，单独成块后，发版只让业务块的哈希变化，
+          // 依赖块继续命中浏览器长缓存（/assets/ 是 immutable），不必每次重下。
+          //
+          // 名单只列主聊天入口本来就会加载的重包，且逐个量过：把 antd + rc-* 分出来
+          // 首屏多 4KB（gzip），但省掉每次发版重下 404KB；不分则相反。只被 /admin、
+          // /config 用到的模块不会因此被提到首屏——实测两种写法的首屏字节几乎相同，
+          // 说明 Rollup 已经把它们留在异步入口块里了。名单之外的包一律交给 Rollup。
+          manualChunks(id: string) {
+            if (!id.includes('node_modules')) return
+            if (REACT_RUNTIME.test(id)) return 'vendor-react'
+            if (ANT_DESIGN.test(id)) return 'vendor-antd'
+            if (id.includes('node_modules/highlight.js/')) return 'vendor-highlight'
+            if (id.includes('node_modules/marked/')) return 'vendor-marked'
+            if (id.includes('node_modules/motion')) return 'vendor-motion'
+          },
+        },
+      },
+    },
     plugins: [react(), univerHyphenationTrim()],
     // 从项目根目录读取 .env，使 VITE_API_BASE_URL 和 SSO_LOGIN_URL 在 build 时生效
     envDir: repoRoot,
