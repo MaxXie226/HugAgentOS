@@ -23,7 +23,13 @@ interface DesktopBoot {
   local_base?: string;
 }
 
+export interface DesktopUpdateStatus {
+  available_version: string | null;
+  busy: boolean;
+}
+
 interface DesktopEvent {
+  update?: DesktopUpdateStatus;
   bridge?: { identity_ready?: boolean; capabilities_ready?: boolean; models_ready?: boolean; error?: string | null; retrying?: boolean };
   service?: { phase?: string; message?: string; progress?: number; ready?: boolean };
 }
@@ -43,6 +49,7 @@ declare global {
 }
 
 interface DeploymentModeState {
+  desktopUpdate: DesktopUpdateStatus | null;
   isDesktop: boolean;
   activeLocal: boolean;
   /** 初始化选定的运行形态：'local_only' | 'cloud_only' | 'dual'（web 上为空串）。 */
@@ -88,6 +95,7 @@ function bootState(): DeploymentModeState {
   const boot = typeof window !== 'undefined' ? window.__HG_DESKTOP__ : undefined;
   if (!boot) {
     return {
+      desktopUpdate: null,
       isDesktop: false,
       activeLocal: false,
       provisionMode: '',
@@ -105,6 +113,7 @@ function bootState(): DeploymentModeState {
     };
   }
   return {
+    desktopUpdate: null,
     isDesktop: true,
     activeLocal: !!boot.active_local,
     provisionMode: boot.provision_mode || '',
@@ -128,12 +137,20 @@ setHybridDual(initial.provisionMode === 'dual');
 
 export const useDeploymentModeStore = create<DeploymentModeState>(() => initial);
 
-if (initial.provisionMode === 'dual' && typeof EventSource !== 'undefined') {
+if (initial.isDesktop && typeof EventSource !== 'undefined') {
   // EventSource 自带断线重连；每帧都是完整状态，丢帧无害。
   const events = new EventSource('/__desktop/events');
   events.onmessage = (message) => {
     try {
       const status = JSON.parse(message.data) as DesktopEvent;
+      if (status.update) {
+        const previous = useDeploymentModeStore.getState().desktopUpdate;
+        if (previous?.available_version !== status.update.available_version ||
+            previous?.busy !== status.update.busy) {
+          useDeploymentModeStore.setState({ desktopUpdate: status.update });
+        }
+      }
+      if (initial.provisionMode !== 'dual') return;
       const localReady = !!status.bridge?.identity_ready;
       const capabilitiesReady = !!status.bridge?.capabilities_ready;
       const modelsReady = !!status.bridge?.models_ready;

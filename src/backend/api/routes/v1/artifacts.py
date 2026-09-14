@@ -16,6 +16,7 @@ from core.auth.backend import UserContext, get_current_user
 from core.content.kb_processing import vectorise_document_background
 from core.db.engine import get_db
 from core.db.models import Artifact, ChatMessage, ChatSession, KBDocument, KBSpace
+from core.db.paging import DEFAULT_PAGE_SIZE
 from core.db.repository import ArtifactRepository
 from core.infra.responses import error_response, success_response
 from core.services import KBService
@@ -377,7 +378,7 @@ async def list_user_artifacts(
         description="仅 personal scope 生效：__root__=个人根目录，<id>=该个人文件夹直接子文件，省略=全部个人文件（向后兼容）",
     ),
     page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=100),
+    page_size: int = Query(DEFAULT_PAGE_SIZE, ge=1, description="每页条数，无上限"),
     user: UserContext = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):

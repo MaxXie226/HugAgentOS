@@ -28,11 +28,13 @@ document/
 │   ├── editions/            # 社区版 vs 商业版、License 机制、CE 构建管线
 │   └── development/         # 后端 / 前端开发指南
 └── internal/                # ⚠️ 内部文档（仅主仓，不随社区版分发）
-    ├── sandbox-snapshot-design.md            # 沙箱快照持久化设计（已实现，被代码注释引用）
-    ├── ontology-harness-implementation.md     # 本体驱动 Harness 工程实施与治理边界
-    ├── 开源与商业化产品方案.md                 # CE/EE 产品与商业策略（权威边界来源）
-    ├── community-commercial-edition-plan.md  # CE/EE 拆分施工图（逐行技术方案）
-    └── ce-ee-repo-restructure-plan.md        # CE/EE 仓库结构与生成管线方案
+    ├── agents/              # 开发工作流约定（development-flow / issue-tracker /
+    │                        #   triage-labels / domain），被 .agents/skills 与 CLAUDE.md 引用
+    ├── harness/             # Harness 引擎迁移与交付验证手册
+    ├── development-guide/   # 二次开发、插件 / 技能开发、商业版部署
+    ├── evaluation/          # 内部评测方案与调研
+    ├── 操作手册/            # 品牌操作手册（docx，含客户信息）
+    └── *.md / *.html        # 内部方案、设计稿、排查与验证报告（按主题平铺）
 ```
 
 ## 开源边界 / Open-source boundary

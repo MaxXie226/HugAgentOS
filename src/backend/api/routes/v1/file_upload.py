@@ -109,6 +109,10 @@ async def overwrite_file(
     if len(file_bytes) > _MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail="文件过大，最大支持 50 MB")
 
+    from core.artifacts.local_project import is_local_project_ref, overwrite_reference
+    if is_local_project_ref(file_id):
+        return overwrite_reference(file_id, str(user.user_id), file_bytes, db)
+
     from core.auth.permissions_iface import resolve_artifact_access
     artifact = db.query(Artifact).filter(
         Artifact.artifact_id == file_id, Artifact.deleted_at.is_(None),

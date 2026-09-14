@@ -39,7 +39,10 @@ class CaptureModel(OpenAICompatChatModel):
         self.arguments = (
             arguments if arguments is not None else {"file_path": "/workspace/screenshot.png"}
         )
-        self.formatter = ReasoningEchoChatFormatter(input_types=["text/plain", "image/*"])
+        # Constructed exactly like production (chat_models.OpenAICompatChatModel):
+        # no input_types override. Passing one here is what used to hide the fact
+        # that the shipped default had been shadowed down to text-only.
+        self.formatter = ReasoningEchoChatFormatter()
 
     async def __call__(self, messages, tools=None, **kwargs):
         self.calls.append(await self.formatter.format(messages))

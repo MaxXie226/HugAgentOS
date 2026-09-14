@@ -56,6 +56,12 @@ Release acceptance must cover:
 5. dual-mode cloud projects remain in the cloud while local-folder projects remain local;
 6. a staged update passes SHA-256 verification, system authorization, installation, and restart.
 
+UOS shares one release index with Windows and macOS: each client fetches the update for its
+own platform and reports "no update available for this platform" when none was published,
+while older clients that send no platform read the common release, which advances only once
+all three platforms have published that version. The desktop version is identical across the
+three platforms and the build enforces it.
+
 See [`desktop-uos/README_EN.md`](../../../desktop-uos/README_EN.md) for commands,
 artifacts, and publishing.
 

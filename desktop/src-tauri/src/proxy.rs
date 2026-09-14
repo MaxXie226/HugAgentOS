@@ -111,6 +111,7 @@ pub async fn serve(state: ProxyState, web_dir: PathBuf) -> std::io::Result<u16> 
         .route("/__desktop/setup/status", get(setup_status))
         .route("/__desktop/setup/install", post(start_local_install))
         .route("/__desktop/events", get(desktop_events))
+        .route("/__desktop/update/status", get(|| async { Json(crate::update::status()) }))
         .route("/api", any(proxy_handler))
         .route("/api/*rest", any(proxy_handler))
         // nginx-free desktop mode still needs the backend-owned public paths:
@@ -456,6 +457,7 @@ struct SetupStatus {
     provision_mode: ProvisionMode,
     /// 双模式：云端身份 / 模型拓扑是否已推到本机执行面。
     bridge: crate::hybrid::BridgeSync,
+    update: crate::update::UpdateStatus,
 }
 
 async fn setup_status_value(state: &ProxyState) -> SetupStatus {
@@ -466,6 +468,7 @@ async fn setup_status_value(state: &ProxyState) -> SetupStatus {
         local_server_base: state.local_base.clone(),
         provision_mode: state.provision_mode.clone(),
         bridge: state.bridge_sync.read().await.clone(),
+        update: crate::update::status(),
     }
 }
 
@@ -479,15 +482,28 @@ async fn desktop_events(
     State(state): State<ProxyState>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let receiver = state.local_server.subscribe();
+    let updates = crate::update::subscribe();
     let stream = futures_util::stream::unfold(
-        (state, receiver, true),
-        |(state, mut receiver, first)| async move {
-            if !first && receiver.changed().await.is_err() {
-                return None;
-            }
-            let status = setup_status_value(&state).await;
+        (state, receiver, updates, None::<SetupStatus>),
+        |(state, mut receiver, mut updates, cached)| async move {
+            let service_changed = if cached.is_some() {
+                tokio::select! {
+                    result = receiver.changed() => { result.ok()?; true },
+                    result = updates.changed() => { result.ok()?; false },
+                }
+            } else {
+                true
+            };
+            // 更新版本/busy 变化只替换内存中的更新字段，不触发本机健康探测。
+            // 保持完整帧格式，兼容安装进度页与 SPA 的已有订阅者。
+            let mut status = if service_changed {
+                setup_status_value(&state).await
+            } else {
+                cached?
+            };
+            status.update = updates.borrow_and_update().clone();
             let event = Event::default().json_data(&status).ok()?;
-            Some((Ok::<_, Infallible>(event), (state, receiver, false)))
+            Some((Ok::<_, Infallible>(event), (state, receiver, updates, Some(status))))
         },
     );
     Sse::new(stream).keep_alive(KeepAlive::default())
@@ -562,7 +578,7 @@ const TB_CSS: &str = r##"
 const TB_MENU: &str = r##"<nav class="tb-menu" aria-label="应用菜单" data-i18n-aria="app_menu">
 <div class="tb-menuGroup" data-menu="file"><button class="tb-menuLabel" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="hugagent-file-menu" data-i18n="file">文件</button><div class="tb-drop" id="hugagent-file-menu" role="menu" aria-label="文件" data-i18n-aria="file">
   <button class="tb-item" type="button" role="menuitem" tabindex="-1" data-act="new_chat"><span data-i18n="new_chat">新建对话</span><span class="tb-shortcut" aria-hidden="true">Ctrl+N</span></button>
-  <div class="tb-sep" role="separator"></div>
+  <button class="tb-item" type="button" role="menuitem" tabindex="-1" data-act="open_folder"><span data-i18n="open_folder">打开文件夹…</span></button>
   <button class="tb-item" type="button" role="menuitem" tabindex="-1" data-act="run_mode"><span data-i18n="run_mode">运行模式…</span></button>
   <button class="tb-item" type="button" role="menuitem" tabindex="-1" data-act="server_config"><span data-i18n="server_config">设置服务器地址…</span></button>
   <button class="tb-item" type="button" role="menuitem" tabindex="-1" data-act="local_server"><span data-i18n="local_server">本机服务…</span></button>
@@ -606,7 +622,7 @@ if(new URLSearchParams(location.search).get('quickask')==='1'){
 var desktopCopy={
   'zh-CN':{
     chrome:'桌面菜单栏',app_menu:'应用菜单',
-    file:'文件',edit:'编辑',view:'视图',help:'帮助',new_chat:'新建对话',run_mode:'运行模式…',
+    file:'文件',edit:'编辑',view:'视图',help:'帮助',new_chat:'新建对话',run_mode:'运行模式…',open_folder:'打开文件夹…',
     server_config:'设置服务器地址…',local_server:'本机服务…',quit:'退出',undo:'撤销',redo:'重做',
     cut:'剪切',copy:'复制',paste:'粘贴',select_all:'全选',reload:'重新加载',fullscreen:'全屏',
     check_update:'检查更新…',website:'访问官网',about:'关于',minimize:'最小化',
@@ -614,7 +630,7 @@ var desktopCopy={
   },
   en:{
     chrome:'Desktop menu bar',app_menu:'Application menu',
-    file:'File',edit:'Edit',view:'View',help:'Help',new_chat:'New Chat',run_mode:'Run Mode…',
+    file:'File',edit:'Edit',view:'View',help:'Help',new_chat:'New Chat',run_mode:'Run Mode…',open_folder:'Open Folder…',
     server_config:'Server Address…',local_server:'Local Service…',quit:'Exit',undo:'Undo',redo:'Redo',
     cut:'Cut',copy:'Copy',paste:'Paste',select_all:'Select All',reload:'Reload',fullscreen:'Full Screen',
     check_update:'Check for Updates…',website:'Visit Website',about:'About',minimize:'Minimize',
@@ -635,6 +651,15 @@ function syncLocale(){
     if(node.getAttribute('aria-label')!==value)node.setAttribute('aria-label',value);
     if(node.tagName==='BUTTON'&&node.title!==value)node.title=value;
   });
+}
+var mode=window.__HG_DESKTOP__&&window.__HG_DESKTOP__.provision_mode;
+if(mode==='dual'){
+  ['run_mode','server_config','local_server'].forEach(function(action){
+    var item=bar.querySelector('[data-act="'+action+'"]');if(item)item.remove();
+  });
+}
+if(mode==='cloud_only'){
+  var folder=bar.querySelector('[data-act="open_folder"]');if(folder)folder.remove();
 }
 var groups=Array.prototype.slice.call(bar.querySelectorAll('.tb-menuGroup'));
 var menuItems=Array.prototype.slice.call(bar.querySelectorAll('.tb-item'));
@@ -804,7 +829,8 @@ fn titlebar_menu_for(hybrid_only: bool) -> String {
     }
     TB_MENU
         .lines()
-        .filter(|line| !line.contains("data-act=\"run_mode\""))
+        .filter(|line| !["run_mode", "server_config", "local_server"].iter().any(|action|
+            line.contains(&format!("data-act=\"{action}\""))))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -1589,6 +1615,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn hybrid_file_menu_only_has_chat_folder_and_exit() {
+        let menu = titlebar_menu_for(true);
+        let file = menu.split("data-menu=\"edit\"").next().unwrap();
+        assert!(file.contains("data-act=\"open_folder\""));
+        assert!(file.contains("data-act=\"new_chat\""));
+        assert!(file.contains("data-win=\"quit\""));
+        for removed in ["run_mode", "server_config", "local_server"] {
+            assert!(!file.contains(removed));
+        }
+    }
+
+    #[test]
     fn windows_titlebar_has_compact_localized_menus_without_a_context_tab() {
         let block = titlebar_block(TB_OFFSET_SPA);
         assert!(!block.contains("tb-logo"));
@@ -1808,7 +1846,7 @@ mod tests {
         let hybrid_only = titlebar_menu_for(true);
         assert!(normal.contains("data-act=\"run_mode\""));
         assert!(!hybrid_only.contains("data-act=\"run_mode\""));
-        for act in ["new_chat", "server_config", "local_server"] {
+        for act in ["new_chat", "open_folder"] {
             assert!(
                 hybrid_only.contains(&format!("data-act=\"{act}\"")),
                 "仅混合模式菜单丢了 {act}"

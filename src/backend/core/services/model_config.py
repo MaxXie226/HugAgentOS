@@ -45,7 +45,12 @@ class ResolvedModelConfig:
     context_length: int = 0  # 0 = not configured; the caller falls back to a default
     timeout: int = 120
     provider: str = "openai_compatible"  # vendor/protocol, see core/llm/providers/registry.py
-    provider_extra: dict = field(default_factory=dict)  # vendor-specific credentials (api_version / aws_* ...)
+    # Identity of the row this came from. ``provider`` is the vendor/protocol and
+    # repeats across rows; failover tracks health per configured endpoint.
+    provider_id: str = ""
+    provider_extra: dict = field(
+        default_factory=dict
+    )  # vendor-specific credentials (api_version / aws_* ...)
     extra: dict = field(default_factory=dict)
 
 
@@ -61,6 +66,8 @@ class ModelConfigService:
         self._cache_lock = threading.Lock()
         # Per-provider lookups share the role cache's TTL and invalidation.
         self._provider_cache: dict[str, Optional[ResolvedModelConfig]] = {}
+        # Failover candidate order, rebuilt on the same TTL / invalidation.
+        self._chain_cache: Optional[list[ResolvedModelConfig]] = None
         self._version: int = 0  # bumped on invalidate
 
     @classmethod
@@ -99,6 +106,54 @@ class ModelConfigService:
             self._provider_cache[pid] = resolved
         return resolved
 
+    def resolve_failover_chain(
+        self, primary: Optional[ResolvedModelConfig]
+    ) -> list[ResolvedModelConfig]:
+        """Return *primary* followed by the other active chat providers to fall back to.
+
+        Ordered by ``model_providers.weight`` (higher first) — the "gateway
+        weight" an operator can already edit in the model console, and whose
+        meaning there is the same one failover needs: the larger the number,
+        the more this endpoint should be used. Ties break on the widest context
+        window, so a switch is least likely to fail on a conversation the
+        previous endpoint was still able to hold.
+
+        ``priority`` is deliberately not used: it has no editor in the console,
+        so ordering by it would be an order nobody can set.
+        """
+        self._maybe_refresh()
+        chain = [
+            c for c in self._chain_snapshot() if not primary or c.provider_id != primary.provider_id
+        ]
+        return ([primary] if primary else []) + chain
+
+    def _chain_snapshot(self) -> list[ResolvedModelConfig]:
+        if self._chain_cache is not None:
+            return self._chain_cache
+        chain: list[ResolvedModelConfig] = []
+        try:
+            db = SessionLocal()
+            try:
+                rows = (
+                    db.query(ModelProvider)
+                    .filter(
+                        ModelProvider.provider_type == "chat",
+                        ModelProvider.is_active == True,  # noqa: E712
+                    )
+                    .all()
+                )
+                ranked = [(int(p.weight or 1), self._provider_to_resolved(p)) for p in rows]
+                ranked.sort(key=lambda item: (-item[0], -item[1].context_length))
+                chain = [resolved for _, resolved in ranked]
+            finally:
+                db.close()
+        except Exception as exc:
+            logger.warning("[ModelConfigService] failover chain load failed: %s", exc)
+            return []
+        with self._cache_lock:
+            self._chain_cache = chain
+        return chain
+
     def _query_provider(self, pid: str) -> Optional[ResolvedModelConfig]:
         try:
             db = SessionLocal()
@@ -127,6 +182,7 @@ class ModelConfigService:
         with self._cache_lock:
             self._cache.clear()
             self._provider_cache.clear()
+            self._chain_cache = None
             self._cache_ts = 0.0
             self._version += 1
 
@@ -140,6 +196,7 @@ class ModelConfigService:
                 return
             self._load_from_db()
             self._provider_cache.clear()
+            self._chain_cache = None
             self._cache_ts = time.monotonic()
 
     def _load_from_db(self) -> None:
@@ -178,6 +235,7 @@ class ModelConfigService:
         for k in provider_extra:
             extra.pop(k, None)
         return ResolvedModelConfig(
+            provider_id=str(provider.provider_id or ""),
             base_url=provider.base_url,
             api_key=provider.api_key,
             model_name=provider.model_name,

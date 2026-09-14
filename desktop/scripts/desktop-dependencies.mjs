@@ -2,6 +2,16 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
+export const DESKTOP_RUNTIME_INPUT_FILES = Object.freeze([
+  "desktop/native-tools.json",
+  "desktop/licenses/OfficeCLI-LICENSE.txt",
+  "desktop/scripts/build-runtime.mjs",
+  "desktop/scripts/desktop-dependencies.mjs",
+  "desktop/scripts/install-native-tools.py",
+  "desktop/scripts/runtime-smoke.py",
+  "desktop/scripts/create-runtime-archive.py",
+]);
+
 export const DESKTOP_REQUIREMENTS_FILE = "desktop/requirements-desktop.txt";
 export const MACOS_DESKTOP_OVERRIDES_FILE =
   "desktop/requirements-desktop-macos-overrides.txt";
@@ -131,10 +141,16 @@ export function desktopDependencyFingerprint(
   const config = desktopTargetConfig(target);
   const lock = readAndValidateDesktopLock(root, target);
   const hash = createHash("sha256");
-  hash.update("desktop-dependencies-v2\0");
+  hash.update("desktop-dependencies-v3\0");
   hash.update(target);
   hash.update("\0");
   for (const file of targetInputFiles(target)) {
+    hash.update(file);
+    hash.update("\0");
+    hash.update(readNormalizedText(join(root, file)));
+    hash.update("\0");
+  }
+  for (const file of DESKTOP_RUNTIME_INPUT_FILES) {
     hash.update(file);
     hash.update("\0");
     hash.update(readNormalizedText(join(root, file)));

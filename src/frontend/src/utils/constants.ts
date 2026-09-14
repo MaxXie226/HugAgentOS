@@ -97,3 +97,7 @@ export const getApiBase = (): string =>
 /** Build a direct download URL for an artifact file. */
 export const buildFileUrl = (fileId: string): string =>
   `${getApiBase()}/files/${fileId}`;
+
+/** 列表默认每页条数。我的空间面板与从我的空间选文件的弹窗共用这一个值，
+ *  避免同一语义在多处各写一个数字（后端对应 core/db/paging.py 的 DEFAULT_PAGE_SIZE）。 */
+export const LIST_PAGE_SIZE = 20;

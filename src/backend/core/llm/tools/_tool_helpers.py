@@ -169,6 +169,16 @@ def _resolve_artifact_files(
     storage = get_storage()
 
     for filename, artifact_id in artifact_refs.items():
+        from core.artifacts.local_project import is_local_project_ref
+        if is_local_project_ref(artifact_id):
+            from core.llm.hooks import _download_artifact_bytes
+            file_bytes = _download_artifact_bytes(artifact_id, filename, "artifact input", user_id=user_id)
+            if file_bytes is None:
+                return None, f"artifact '{artifact_id}' 不存在或无权访问"
+            if len(file_bytes) > MAX_ARTIFACT_FILE_SIZE:
+                return None, f"artifact 文件 '{filename}' 过大"
+            result[filename] = base64.b64encode(file_bytes).decode("ascii")
+            continue
         storage_key = None
         owner_ok = True
 

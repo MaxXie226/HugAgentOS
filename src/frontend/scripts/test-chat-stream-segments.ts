@@ -12,6 +12,7 @@ import { extractCodeFromStreamingArgs } from '../src/utils/codeExecParser';
 import { buildHistorySegments } from '../src/utils/segments';
 import { refreshTargetForTool } from '../src/utils/toolRefresh';
 import { parseAppliedQueueHandoff, parseQueuedRunHandoff } from '../src/utils/streamHandoff';
+import { resolveToolCardIndex } from '../src/utils/toolMatching';
 
 function tool(toolIndex: number): MessageSegment {
   return { type: 'tool', toolIndex };
@@ -453,6 +454,37 @@ function tool(toolIndex: number): MessageSegment {
   // 精确匹配：uninstall_plugin 不能靠"包含 install_plugin"这种巧合被覆盖。
   assert.equal(refreshTargetForTool('uninstall_plugin'), 'plugins');
   assert.equal(refreshTargetForTool('totally_unknown_tool'), undefined);
+}
+
+{
+  // 工具结果只按 tool_call_id 归位。同名不是身份：并发跑 8 个 read_image 时同一个
+  // 名字对应 8 张卡，按名字认领会把输出填进别人的卡里，还把真正那次调用藏起来。
+  const parallel = [
+    { id: 'call-a', name: 'read_image', status: 'running' },
+    { id: 'call-b', name: 'read_image', status: 'running' },
+    { id: 'call-c', name: 'read_image', status: 'running' },
+  ];
+  assert.equal(resolveToolCardIndex(parallel, 'call-c', 'read_image'), 2, '按 id 归位');
+  assert.equal(resolveToolCardIndex(parallel, 'call-a', 'read_image'), 0, '按 id 归位');
+
+  // 带了 id 却没有对应卡片 → 返回 -1，让调用方补建，绝不认领同名的在跑卡片。
+  assert.equal(
+    resolveToolCardIndex(parallel, 'call-zzz', 'read_image', { fallbackToAnyRunning: true }),
+    -1,
+    'id 认不到时不得按名字抢别人的卡',
+  );
+
+  // 完全没带 id 的事件才允许按名字兜底（取最后一张还在跑的同名卡）。
+  assert.equal(resolveToolCardIndex(parallel, undefined, 'read_image'), 2);
+  // 同名但已经收口的卡不该被重复认领。
+  const settled = [
+    { id: 'call-a', name: 'bash', status: 'success' },
+    { id: 'call-b', name: 'bash', status: 'running' },
+  ];
+  assert.equal(resolveToolCardIndex(settled, undefined, 'bash'), 1);
+  // 没 id 也没同名在跑：只有显式允许时才退到"任何还在跑的"。
+  assert.equal(resolveToolCardIndex(settled, undefined, 'grep'), -1);
+  assert.equal(resolveToolCardIndex(settled, undefined, 'grep', { fallbackToAnyRunning: true }), 1);
 }
 
 console.log('chat stream segment tests passed');

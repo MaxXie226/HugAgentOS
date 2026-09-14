@@ -380,7 +380,7 @@ def _prompt_cache_context_hash(ctx: Dict[str, Any]) -> str:
 # Project-mode section moved to prompts.project_section; re-export for compat
 from prompts.project_section import (  # noqa: E402
     _format_size,
-    _PROJECT_FILE_LIST_CAP,
+    PROJECT_FILE_LIST_CAP,
     PROJECT_MODE_PART_ID,
     PROJECT_MODE_DISPLAY_NAME,
     _PROJECT_MODE_DEFAULT_TEMPLATE,
@@ -908,6 +908,7 @@ def build_system_prompt(
                 folder_name=ctx.get("project_folder_name") or "",
                 folder_kind=ctx.get("project_folder_kind") or "",
                 project_files=ctx.get("project_files") or [],
+                project_file_count=ctx.get("project_file_count"),
             )
         if proj_section:
             if ctx.get("project_is_local") and ctx.get("local_site_edit"):

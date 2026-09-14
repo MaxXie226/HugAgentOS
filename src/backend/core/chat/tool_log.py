@@ -303,10 +303,15 @@ def attach_tool_result(
     Returns the call's duration in ms when the opening entry carried a start
     stamp, so the caller can put the same number on the wire.
     """
+    # Identity is the call id and nothing else. Matching on the tool name as a
+    # fallback used to cross-attach parallel calls: with eight read_image calls
+    # open, every result matched entry #1 by name before reaching its own entry,
+    # so args and results ended up describing different files and duration_ms
+    # was measured against another call's start stamp. The name fallback also
+    # had nothing left to do — every call carries an id from AgentScope's
+    # required ToolCallBlock.id (62,926 persisted calls checked, none missing).
     for tc in tool_calls_log:
         if tid and tc.get("tool_id") == tid:
-            return _settle_tool_call(tc, res, status)
-        if tn and tc.get("tool_name") == tn and "result" not in tc:
             return _settle_tool_call(tc, res, status)
     if tid or tn:
         # No opening entry to close (a result that arrived without its call):

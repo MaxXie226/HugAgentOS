@@ -684,6 +684,7 @@ def register_sandbox_get_artifact(
     chat_id: Optional[str] = None,
     sandbox_session_id: Optional[str] = None,
     user_id: Optional[str] = None,
+    scope: Optional["ProjectScope"] = None,
 ) -> None:
     """Read a sandbox file and register it as a downloadable artifact."""
     if os.getenv("SANDBOX_TOOLS_ENABLED", "true").lower() != "true":
@@ -700,6 +701,29 @@ def register_sandbox_get_artifact(
         from core.sandbox import SandboxConnectError as _SandboxConnectError
         from core.sandbox import SandboxError as _SandboxError
         from core.sandbox import get_sandbox_provider as _get_provider
+
+        from core.config.local_mode import local_mode_enabled
+        from ._paths import to_physical_path
+
+        if local_mode_enabled():
+            from core.artifacts.local_project import reference_project_file, is_project_file_path
+            from fastapi import HTTPException
+
+            local_scope = scope
+            if local_scope and local_scope.is_local:
+                physical = to_physical_path(src_path, user_id, session_id=_sess)
+                # Project files are already durable. Only scratch exports need a copy.
+                if is_project_file_path(src_path, local_scope) or is_project_file_path(physical, local_scope):
+                    try:
+                        ref = await asyncio.to_thread(
+                            reference_project_file, physical, scope=local_scope,
+                            user_id=user_id or "", name=name,
+                        )
+                    except (HTTPException, OSError, ValueError) as exc:
+                        return _resp_json({"error": str(getattr(exc, "detail", exc))})
+                    ref = {k: ref[k] for k in ("file_id", "name", "mime_type", "size")}
+                    ref["url"] = f"/files/{ref['file_id']}"
+                    return _resp_json({"ok": True, **ref, "artifacts": [ref]})
 
         path_err = _validate_workspace_path(src_path)
         if path_err:
@@ -780,12 +804,12 @@ def register_sandbox_get_artifact(
             tmp_path.unlink(missing_ok=True)
 
     sandbox_get_artifact.__doc__ = (
-        "把沙盒文件登记为持久 artifact 并返回 file_id。\n\n"
+        "登记文件并返回 file_id。本机项目文件只引用原文件，不复制到 artifacts；临时沙盒文件才导出保存。\n\n"
         "⚠️ **登记 ≠ 交付**：返回的 url 默认对用户隐藏，必须再调\n"
         "`pin_to_workspace(file_ids=[...])` 文件才作为附件出现在对话区；\n"
         "**禁止**把 file_id 或 url 写进正文当下载链接。\n\n"
         "Args:\n"
-        "    src_path (`str`): 沙盒里的源文件绝对路径，必须以 /workspace/ 开头。\n"
+        "    src_path (`str`): 沙盒 /workspace/ 路径，或当前本机项目中的真实绝对路径。\n"
         "    name (`str`, 可选): 用户面向的文件名。不传则取 src_path 的 basename。\n\n"
         "Returns:\n"
         "    JSON: {ok: true, file_id, name, url, mime_type, size, artifacts: [...]}\n"

@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from core.db.models import Artifact, ChatSession
+from core.db.paging import DEFAULT_PAGE_SIZE, apply_page
 from sqlalchemy import desc, func, or_
 from sqlalchemy.orm import Session
 
@@ -90,7 +91,7 @@ class ArtifactRepository:
         keyword: Optional[str] = None,
         source_kind: Optional[str] = None,
         page: int = 1,
-        page_size: int = 20,
+        page_size: Optional[int] = DEFAULT_PAGE_SIZE,
         personal_only: bool = True,
         folder_id: Optional[str] = None,
     ) -> tuple[List[Dict[str, Any]], int]:
@@ -101,6 +102,7 @@ class ArtifactRepository:
             keyword: fuzzy match on filename or title.
             source_kind: "user_upload" | "ai_generated"; filters on
                 ``extra_data.source`` using a dialect-aware JSON accessor.
+            page_size: None or a non-positive value returns every matching row.
             personal_only: when True (default), apply the edition's personal-file filter.
             folder_id: only takes effect when personal_only=True.
                 "__root__" → root directory only (user_folder_id IS NULL);
@@ -159,12 +161,9 @@ class ArtifactRepository:
             )
 
         total = query.count()
-        rows = (
-            query.order_by(desc(Artifact.created_at))
-            .offset((page - 1) * page_size)
-            .limit(page_size)
-            .all()
-        )
+        rows = apply_page(
+            query.order_by(desc(Artifact.created_at)), page=page, page_size=page_size
+        ).all()
 
         items = []
         for artifact, chat_title in rows:

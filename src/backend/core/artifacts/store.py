@@ -282,6 +282,11 @@ def get_artifact(file_id: str) -> Optional[Dict[str, Any]]:
         if not isinstance(item, dict):
             return None
 
+    if (item.get("metadata") or {}).get("source") == "local_project_reference":
+        from .local_project import resolve_project_reference
+
+        return resolve_project_reference(item)
+
     # Local mode (item carries a local path): confirm the file actually exists to avoid a dangling index.
     # Note: local entries now also carry storage_key, so we must first check existence by path,
     # and not pass just because storage_key is non-empty (otherwise a deleted file would still be judged valid).

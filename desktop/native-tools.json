@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "officecli": {
+    "version": "1.0.144",
+    "license": "Apache-2.0",
+    "source": "https://github.com/iOfficeAI/OfficeCLI/releases/tag/v1.0.144",
+    "targets": {
+      "windows-x86_64": {
+        "url": "https://github.com/iOfficeAI/OfficeCLI/releases/download/v1.0.144/officecli-win-x64.exe",
+        "sha256": "e780cc6a5385f84b4d54d71b0c179904ed534125ec33fe39b1a8711fa80e387e",
+        "size": 33382312
+      },
+      "darwin-aarch64": {
+        "url": "https://github.com/iOfficeAI/OfficeCLI/releases/download/v1.0.144/officecli-mac-arm64",
+        "sha256": "04757163428c5bde8d91e8f838517818e74722157722ca5f3877b6716b77bd45",
+        "size": 33760816
+      },
+      "darwin-x86_64": {
+        "url": "https://github.com/iOfficeAI/OfficeCLI/releases/download/v1.0.144/officecli-mac-x64",
+        "sha256": "366100643d757b0da24829422897ca74768a894b5ecd1a471a1336f8e2a0787d",
+        "size": 34705536
+      },
+      "linux-x86_64": {
+        "url": "https://github.com/iOfficeAI/OfficeCLI/releases/download/v1.0.144/officecli-linux-x64",
+        "sha256": "32ef7a21a54a4ca6c9806bf5e9f3d32bfb1291017329c55044cb2aac71822eb8",
+        "size": 35316133
+      },
+      "linux-aarch64": {
+        "url": "https://github.com/iOfficeAI/OfficeCLI/releases/download/v1.0.144/officecli-linux-arm64",
+        "sha256": "56ec2c3114b66f6490888b6778cbb8413a65911a26cacc7207f29e13424966da",
+        "size": 34733575
+      }
+    }
+  }
+}

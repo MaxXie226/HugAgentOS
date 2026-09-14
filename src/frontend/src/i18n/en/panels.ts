@@ -127,6 +127,8 @@ export const PANELS_DICT: Record<string, string> = {
   '预览文件或运行本体校验后，内容会显示在这里。':
     'Preview a file or run ontology validation to show content here.',
   // ── Sidebar / items ──────────────────────────────────────────────────
+  '新建本地项目失败': 'Could not create local project',
+  '下载更新': 'Download update',
   '新建对话': 'New Chat',
   '暂无对话记录': 'No chats yet',
   '确认退出登录？': 'Sign out?',

@@ -16,10 +16,15 @@ use crate::Shared;
 /// macOS 使用系统应用菜单；Windows/Linux 主窗口使用与标题同一行的 WebView 菜单。
 #[allow(dead_code)]
 pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
+    let config = crate::config::load(&app.state::<Shared>().config_dir);
+    let hybrid =
+        brand::HYBRID_ONLY || config.provision_mode() == crate::config::ProvisionMode::Dual;
+    let local_capable = config.provision_mode() != crate::config::ProvisionMode::CloudOnly;
     #[cfg(target_os = "macos")]
     {
         let about = AboutMetadataBuilder::new()
             .name(Some(brand::NAME.to_string()))
+            .version(Some(app.package_info().version.to_string()))
             .build();
         let application = SubmenuBuilder::new(app, brand::NAME)
             .about(Some(about))
@@ -38,14 +43,16 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
 
         let mut file = SubmenuBuilder::new(app, "文件").text("new_chat", "新建对话");
         // 仅交付混合模式的包没有别的形态可切，不摆一个点了也没意义的入口。
-        if !crate::brand::HYBRID_ONLY {
+        if !hybrid {
             file = file.text("run_mode", "运行模式…");
         }
-        let file = file
-            .text("local_server", "本机服务…")
-            .separator()
-            .close_window()
-            .build()?;
+        if local_capable {
+            file = file.text("open_folder", "打开文件夹…");
+        }
+        if !hybrid {
+            file = file.text("local_server", "本机服务…");
+        }
+        let file = file.separator().quit().build()?;
 
         let edit = SubmenuBuilder::new(app, "编辑")
             .undo()
@@ -79,15 +86,18 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     {
         let mut file = SubmenuBuilder::new(app, "文件").text("new_chat", "新建对话");
         // 仅交付混合模式的包没有别的形态可切，不摆一个点了也没意义的入口。
-        if !crate::brand::HYBRID_ONLY {
+        if !hybrid {
             file = file.text("run_mode", "运行模式…");
         }
-        let file = file
-            .text("server_config", "设置服务器地址…")
-            .text("local_server", "本机服务…")
-            .separator()
-            .quit()
-            .build()?;
+        if local_capable {
+            file = file.text("open_folder", "打开文件夹…");
+        }
+        if !hybrid {
+            file = file
+                .text("server_config", "设置服务器地址…")
+                .text("local_server", "本机服务…");
+        }
+        let file = file.separator().quit().build()?;
 
         // 编辑：交给系统预定义项，直接作用于焦点输入框。
         let edit = SubmenuBuilder::new(app, "编辑")
@@ -108,6 +118,7 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
 
         let about = AboutMetadataBuilder::new()
             .name(Some(brand::NAME.to_string()))
+            .version(Some(app.package_info().version.to_string()))
             .build();
         let help = SubmenuBuilder::new(app, "帮助")
             .text("check_update", "检查更新…")
@@ -140,6 +151,23 @@ pub fn dispatch(app: &AppHandle, id: &str) {
                 let _ = w.unminimize();
                 let _ = w.set_focus();
             }
+        }
+        "open_folder" => {
+            let shared = app.state::<Shared>();
+            let cfg = crate::config::load(&shared.config_dir);
+            if cfg.provision_mode() == crate::config::ProvisionMode::CloudOnly {
+                return;
+            }
+            let app = app.clone();
+            app.clone().dialog().file().pick_folder(move |picked| {
+                let Some(path) = picked.and_then(|p| p.into_path().ok()) else { return };
+                if let Some(window) = app.get_webview_window("main") {
+                    let detail = serde_json::to_string(&path.to_string_lossy()).unwrap();
+                    let _ = window.eval(format!(
+                        "if(window.dispatchEvent(new CustomEvent('hugagent:open-project-folder',{{detail:{detail},cancelable:true}}))){{sessionStorage.setItem('hugagent:pending-project-folder',{detail});window.location.replace('/');}}"
+                    ));
+                }
+            });
         }
         "server_config" => crate::open_server_config(app),
         // 运行模式选择页（本机 / 云端 / 双模式）——初始化选型的再次入口。
@@ -189,7 +217,11 @@ pub fn dispatch(app: &AppHandle, id: &str) {
             // about / 系统预定义项由系统自行处理，这里无需接管；未知 id 兜底提示。
             if id == "about" {
                 app.dialog()
-                    .message(format!("{} 桌面客户端", brand::NAME))
+                    .message(format!(
+                        "{} 桌面客户端\n当前版本：{}",
+                        brand::NAME,
+                        app.package_info().version
+                    ))
                     .title("关于")
                     .blocking_show();
             }

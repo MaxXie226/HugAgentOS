@@ -11,6 +11,7 @@ from typing import Any, Optional
 from agentscope.message import TextBlock
 from agentscope.tool import Toolkit
 from agentscope.tool._response import ToolChunk as ToolResponse
+from core.db.paging import DEFAULT_PAGE_SIZE, normalize_page, normalize_page_size, paging_meta
 from core.llm.tools.edition_myspace import (
     find_organization_project_artifact,
     list_organization_project_files,
@@ -89,7 +90,8 @@ def register_myspace_tools(
         folder_id: str = "",
         file_type: str = "all",
         keyword: str = "",
-        limit: int = 20,
+        limit: int = DEFAULT_PAGE_SIZE,
+        page: int = 1,
     ) -> ToolResponse:
         """列出当前"我的空间"项目范围中的内容（子文件夹 + 文件）。
 
@@ -107,21 +109,26 @@ def register_myspace_tools(
             keyword (`str`):
                 按文件名/标题模糊搜索。
             limit (`int`):
-                返回文件条数上限，默认 20，最大 100。
+                每页返回的文件条数，默认 20，没有上限；填 0 或负数表示不分页、一次返回全部。
+            page (`int`):
+                页码，从 1 开始。文件多于一页时用它翻页取后续文件。
 
         Returns:
-            JSON 文本：`{folder, sub_folders, items, total}`。
+            JSON 文本：`{folder, sub_folders, items, total, page, page_size, total_pages, has_more}`。
             - `folder`：当前所在文件夹元信息 `{folder_id, name}`；位于根目录时为 null。
-            - `sub_folders`：当前层级的直接子文件夹列表 `[{folder_id, name}, ...]`。
-            - `items`：当前层级的文件 `[{artifact_id, name, type, mime_type, size_bytes, source, ...}]`。
+            - `sub_folders`：当前层级的直接子文件夹列表 `[{folder_id, name}, ...]`；不参与分页。
+            - `items`：当前页的文件 `[{artifact_id, name, type, mime_type, size_bytes, source, ...}]`。
             - `total`：当前过滤条件下的文件总数（不含 sub_folders 计数）。
+            - `total_pages` / `has_more`：总页数与是否还有下一页；`has_more` 为 true 就用
+              `page+1` 再调一次，直到取完。
         """
         try:
             from core.db.engine import SessionLocal
             from core.db.models import UserFolder
             from core.db.repository import ArtifactRepository
 
-            limit = min(int(limit), 100)
+            page_size = normalize_page_size(limit)
+            page = normalize_page(page)
             mime_prefix: Optional[str] = None
             if file_type == "image":
                 mime_prefix = "image/"
@@ -144,7 +151,8 @@ def register_myspace_tools(
                     folder_id=folder_id,
                     mime_prefix=mime_prefix,
                     keyword=keyword,
-                    limit=limit,
+                    page=page,
+                    page_size=page_size,
                 )
                 if organization_listing is not None:
                     folder_info, sub_folders, items_rows, total = organization_listing
@@ -187,8 +195,8 @@ def register_myspace_tools(
                         user_id=user_id,
                         mime_prefix=mime_prefix,
                         keyword=keyword or None,
-                        page=1,
-                        page_size=limit,
+                        page=page,
+                        page_size=page_size,
                         folder_id=folder_id or ROOT_FOLDER_SENTINEL,
                     )
             finally:
@@ -223,8 +231,8 @@ def register_myspace_tools(
             payload = {
                 "folder": folder_info,
                 "sub_folders": sub_folders,
-                "total": total,
                 "items": items,
+                **paging_meta(total=total, page=page, page_size=page_size),
             }
             return ToolResponse(
                 content=[TextBlock(type="text", text=json.dumps(payload, ensure_ascii=False))],

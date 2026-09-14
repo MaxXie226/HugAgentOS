@@ -112,6 +112,8 @@ def _model_cache_key(name: str) -> str | tuple[str, str]:
 def _get_main_model(mode: str = "medium"):
     """Get the main agent model for the given chat mode (fast/medium/high/max)."""
     from core.llm.chat_models import get_default_model
+    from core.llm.failover import with_failover
+    from core.services.model_config import ModelConfigService
 
     _check_version()
     key = _model_cache_key(f"main:{mode}")
@@ -127,13 +129,17 @@ def _get_main_model(mode: str = "medium"):
         # supports_reasoning_effort (chat_models internally distinguishes
         # effort=medium vs None)
         instance = get_default_model(reasoning_effort="medium", stream=True)
+    instance = with_failover(
+        instance, ModelConfigService.get_instance().resolve("main_agent"), mode=mode
+    )
     _model_cache[key] = instance
     return instance
 
 
 def _get_provider_model(provider_id: str, mode: str = "medium"):
     """Get a user-selected active chat provider model for the given chat mode."""
-    from core.llm.chat_models import make_chat_model
+    from core.llm.chat_models import build_model_for_mode
+    from core.llm.failover import with_failover
     from core.services.model_config import ModelConfigService
 
     pid = (provider_id or "").strip()
@@ -148,30 +154,8 @@ def _get_provider_model(provider_id: str, mode: str = "medium"):
     if resolved is None:
         return _get_main_model(mode)
 
-    supports_effort = bool((resolved.extra or {}).get("supports_reasoning_effort"))
-    disable_thinking = mode in ("fast", "turbo")
-    reasoning_effort = None
-    if not disable_thinking and supports_effort and mode in ("medium", "high", "max"):
-        reasoning_effort = mode
-
-    instance = make_chat_model(
-        model=resolved.model_name,
-        temperature=resolved.temperature,
-        max_tokens=resolved.max_tokens,
-        timeout=resolved.timeout,
-        base_url=resolved.base_url,
-        api_key=resolved.api_key,
-        provider=resolved.provider,
-        provider_extra=resolved.provider_extra,
-        disable_thinking=disable_thinking,
-        reasoning_effort=reasoning_effort,
-        stream=True,
-        # Same per-model admin flag as get_default_model: reasoning arrives via the
-        # separate reasoning_content channel, so announce it at stream start and the
-        # frontend never buffers a no-thinking answer as presumed reasoning.
-        structured_reasoning=(
-            True if (resolved.extra or {}).get("structured_reasoning") else None
-        ),
+    instance = with_failover(
+        build_model_for_mode(resolved, mode=mode, stream=True), resolved, mode=mode
     )
     _model_cache[key] = instance
     return instance
@@ -238,6 +222,17 @@ def _download_artifact_bytes(
                 file_id,
                 user_id,
             )
+            return None
+
+    from core.artifacts.local_project import authorized_reference, is_local_project_ref
+    if is_local_project_ref(file_id):
+        item = authorized_reference(file_id, user_id)
+        if not item:
+            return None
+        try:
+            from pathlib import Path
+            return Path(item["path"]).read_bytes()
+        except OSError:
             return None
 
     storage_key, _ = resolve_artifact_storage(file_id, fallback_name)

@@ -2571,17 +2571,20 @@ export async function logout(): Promise<string | undefined> {
  * Use in App.tsx for direct fetch() calls that bypass apiRequest().
  */
 export function authFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
-  // 混合路由兜底：按 URL 中的项目/聊天归属自动打本机头（调用方显式头优先）。
-  const inferred = inferTargetHeadersFromUrl(String(input));
-  const mergedInit: RequestInit | undefined =
-    Object.keys(inferred).length > 0
-      ? { ...init, headers: { ...inferred, ...(init?.headers ?? {}) } }
-      : init;
+  const request = input instanceof Request ? input : undefined;
+  const url = request?.url ?? String(input);
+  const headers = new Headers(inferTargetHeadersFromUrl(url));
+  new Headers(init?.headers ?? request?.headers).forEach((value, key) => headers.set(key, value));
+  const localTarget = headers.get(LOCAL_TARGET_HEADER) === 'local'
+    || new URL(url, 'http://request.invalid').searchParams.get('hg_target') === 'local';
   return fetch(input, {
-    ...mergedInit,
+    ...init,
+    headers,
     credentials: 'include',
   }).then(async (response) => {
-    if (response.status === 401 && _on401) {
+    // Local file/service authentication cannot invalidate the cloud session.
+    // Keep the response for the preview's own error state and retry action.
+    if (response.status === 401 && !localTarget && _on401) {
       let loginUrl = '';
       try {
         const payload = await response.clone().json();

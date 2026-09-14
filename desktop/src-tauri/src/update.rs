@@ -12,14 +12,85 @@
 //! **下载进度**走一个独立的原生进度窗（内联 HTML 的 data: URL，本地内容），进度由 Rust 侧
 //! `eval` 直接推 DOM——不依赖主窗的远程 IPC，也无需给进度窗配任何 capability。
 
+use std::sync::OnceLock;
 use tauri::{AppHandle, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_updater::UpdaterExt;
+use tokio::sync::watch;
 
 use crate::{apply_display_zoom, brand, WEBVIEW_BROWSER_ARGS};
 
+#[derive(Clone, Default, PartialEq, serde::Serialize)]
+pub struct UpdateStatus {
+    pub current_version: String,
+    pub available_version: Option<String>,
+    pub busy: bool,
+}
+
+static STATUS: OnceLock<watch::Sender<UpdateStatus>> = OnceLock::new();
+
+fn state() -> &'static watch::Sender<UpdateStatus> {
+    STATUS.get_or_init(|| {
+        watch::channel(UpdateStatus {
+            current_version: env!("CARGO_PKG_VERSION").into(),
+            ..Default::default()
+        })
+        .0
+    })
+}
+
+pub fn status() -> UpdateStatus {
+    state().borrow().clone()
+}
+
+pub fn subscribe() -> watch::Receiver<UpdateStatus> {
+    state().subscribe()
+}
+
+struct UpdateGuard;
+impl Drop for UpdateGuard {
+    fn drop(&mut self) {
+        state().send_if_modified(|status| {
+            if !status.busy {
+                return false;
+            }
+            status.busy = false;
+            true
+        });
+    }
+}
+
+fn begin() -> Option<UpdateGuard> {
+    state()
+        .send_if_modified(|status| {
+            if status.busy {
+                return false;
+            }
+            status.busy = true;
+            true
+        })
+        .then(|| UpdateGuard)
+}
+
+fn set_available(version: Option<String>) {
+    state().send_if_modified(|status| {
+        if status.available_version == version {
+            return false;
+        }
+        status.available_version = version;
+        true
+    });
+}
+
+pub fn version_message(current: &str, available: Option<&str>) -> String {
+    match available {
+        Some(next) => format!("当前版本：{current}\n发现新版本：{next}"),
+        None => format!("当前版本：{current}\n当前平台暂无可用更新。"),
+    }
+}
+
 /// 进度窗内联页面。定义 `__set/__done/__fail` 三个函数，Rust 侧靠 `eval` 调用它们刷新界面。
-/// 页面自带 DOM + 脚本，一加载完就绪，不存在「eval 早于 DOM 就绪」的竞态。
+/// 创建窗口时等待页面加载完成，再开始下载，避免丢失第一帧或安装完成事件。
 const PROGRESS_HTML: &str = r#"<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
@@ -60,11 +131,24 @@ const PROGRESS_HTML: &str = r#"<!doctype html><html lang="zh-CN"><head><meta cha
 ///
 /// - `update_base`：桌面发布源根地址，用于拼更新 endpoint。
 /// - `silent`：为 true 时「已是最新」「检查失败」都不弹框（预留给启动静默检查）；
-///   但「发现新版本」始终弹确认框——绝不静默自动安装。
+///   发现新版只保存状态，由用户点击下载入口后确认安装。
 pub fn check_and_install(app: AppHandle, update_base: String, silent: bool) {
+    let Some(guard) = begin() else {
+        if !silent {
+            app.dialog()
+                .message(format!(
+                    "当前版本：{}\n正在检查或安装更新，请稍候。",
+                    status().current_version
+                ))
+                .title(format!("{} 更新", brand::NAME))
+                .show(|_| {});
+        }
+        return;
+    };
     tauri::async_runtime::spawn(async move {
+        let _guard = guard;
         let endpoint = format!(
-            "{}/api/v1/desktop/latest.json",
+            "{}/api/v1/desktop/latest.json?target={{{{target}}}}&arch={{{{arch}}}}",
             update_base.trim_end_matches('/')
         );
         let url = match url::Url::parse(&endpoint) {
@@ -72,7 +156,11 @@ pub fn check_and_install(app: AppHandle, update_base: String, silent: bool) {
             Err(e) => return report_err(&app, silent, &format!("更新地址非法：{e}")),
         };
 
-        let updater = match app.updater_builder().endpoints(vec![url]) {
+        let updater = match app
+            .updater_builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .endpoints(vec![url])
+        {
             Ok(b) => match b.build() {
                 Ok(u) => u,
                 Err(e) => return report_err(&app, silent, &format!("初始化更新器失败：{e}")),
@@ -83,11 +171,16 @@ pub fn check_and_install(app: AppHandle, update_base: String, silent: bool) {
         match updater.check().await {
             Ok(Some(update)) => {
                 let ver = update.version.clone();
+                set_available(Some(ver.clone()));
+                if silent {
+                    return;
+                }
+                let version_info = version_message(&status().current_version, Some(&ver));
                 let notes = update.body.clone().unwrap_or_default();
                 let msg = if notes.trim().is_empty() {
-                    format!("发现新版本 {ver}。\n\n是否现在下载并更新？更新完成后应用会自动重启。")
+                    format!("{version_info}\n\n是否现在下载并更新？更新完成后应用会自动重启。")
                 } else {
-                    format!("发现新版本 {ver}\n\n{notes}\n\n是否现在下载并更新？更新完成后应用会自动重启。")
+                    format!("{version_info}\n\n{notes}\n\n是否现在下载并更新？更新完成后应用会自动重启。")
                 };
                 let confirmed = app
                     .dialog()
@@ -104,7 +197,10 @@ pub fn check_and_install(app: AppHandle, update_base: String, silent: bool) {
                 }
 
                 // 确认后弹出独立进度窗（本地内容，eval 驱动，无需 capability）。
-                let progress_win = build_progress_window(&app);
+                let Some(window) = build_progress_window(&app) else {
+                    return report_err(&app, false, "无法打开更新进度卡片，请重试。");
+                };
+                let progress_win = Some(window);
 
                 // 下载进度回调：累加已下载字节，按百分比变化节流刷新进度窗。
                 let win_chunk = progress_win.clone();
@@ -151,11 +247,6 @@ pub fn check_and_install(app: AppHandle, update_base: String, silent: bool) {
                         if let Some(w) = progress_win {
                             let _ = w.close();
                         }
-                        app.dialog()
-                            .message("更新已安装，点击确定重启应用。")
-                            .title(format!("{} 更新", brand::NAME))
-                            .kind(MessageDialogKind::Info)
-                            .blocking_show();
                         app.restart();
                     }
                     Err(e) => {
@@ -167,9 +258,10 @@ pub fn check_and_install(app: AppHandle, update_base: String, silent: bool) {
                 }
             }
             Ok(None) => {
+                set_available(None);
                 if !silent {
                     app.dialog()
-                        .message("当前已是最新版本。")
+                        .message(version_message(&status().current_version, None))
                         .title(format!("{} 更新", brand::NAME))
                         .kind(MessageDialogKind::Info)
                         .blocking_show();
@@ -181,7 +273,7 @@ pub fn check_and_install(app: AppHandle, update_base: String, silent: bool) {
 }
 
 /// 在**主线程**上创建进度窗并把 handle 取回（窗口创建跨平台要求主线程）。
-/// 失败/超时都返回 None——拿不到进度窗不影响更新本身继续跑（只是没进度显示）。
+/// 失败/超时返回 None，调用方停止更新并允许重试。
 fn build_progress_window(app: &AppHandle) -> Option<WebviewWindow> {
     use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 
@@ -193,9 +285,15 @@ fn build_progress_window(app: &AppHandle) -> Option<WebviewWindow> {
     let (tx, rx) = std::sync::mpsc::channel::<Option<WebviewWindow>>();
     let app2 = app.clone();
     let res = app.run_on_main_thread(move || {
-        let win =
+        let ready = tx.clone();
+        let result =
             WebviewWindowBuilder::new(&app2, "hug_updater_progress", WebviewUrl::External(parsed))
                 .title(title)
+                .on_page_load(move |window, payload| {
+                    if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
+                        let _ = ready.send(Some(window));
+                    }
+                })
                 // WebView2 uses one browser environment per argument set. Keep this identical to the
                 // main and auxiliary windows or this progress webview can fail to load after the DPI fix.
                 .additional_browser_args(WEBVIEW_BROWSER_ARGS)
@@ -203,21 +301,31 @@ fn build_progress_window(app: &AppHandle) -> Option<WebviewWindow> {
                 .resizable(false)
                 .minimizable(false)
                 .maximizable(false)
+                .closable(false)
                 .always_on_top(true)
                 .center()
                 .build()
                 .inspect(|window| {
                     apply_display_zoom(window);
-                })
-                .ok();
-        let _ = tx.send(win);
+                });
+        if result.is_err() {
+            let _ = tx.send(None);
+        }
     });
     if res.is_err() {
         return None;
     }
-    rx.recv_timeout(std::time::Duration::from_secs(5))
+    let window = rx
+        .recv_timeout(std::time::Duration::from_secs(15))
         .ok()
-        .flatten()
+        .flatten();
+    if window.is_none() {
+        use tauri::Manager;
+        if let Some(window) = app.get_webview_window("hug_updater_progress") {
+            let _ = window.close();
+        }
+    }
+    window
 }
 
 /// 弹错误框（silent 时静默）。
@@ -227,8 +335,61 @@ fn report_err(app: &AppHandle, silent: bool, msg: &str) {
         return;
     }
     app.dialog()
-        .message(msg)
+        .message(format!("当前版本：{}\n\n{msg}", status().current_version))
         .title(format!("{} 更新", brand::NAME))
         .kind(MessageDialogKind::Error)
         .blocking_show();
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn update_attempts_preserve_offer_on_cancel_or_error_and_allow_retry() {
+        use super::*;
+        let mut events = subscribe();
+        events.borrow_and_update();
+        set_available(Some("2.0.0".into()));
+        assert!(
+            events.has_changed().unwrap(),
+            "new version must wake the event stream"
+        );
+        events.borrow_and_update();
+        set_available(Some("2.0.0".into()));
+        assert!(
+            !events.has_changed().unwrap(),
+            "unchanged state must not wake the UI"
+        );
+        {
+            let _attempt = begin().unwrap();
+            assert!(status().busy);
+            assert!(
+                begin().is_none(),
+                "double-click must not launch another update"
+            );
+        }
+        assert!(!status().busy);
+        assert_eq!(status().available_version.as_deref(), Some("2.0.0"));
+        let retry = begin().expect("cancel/error releases the update gate");
+        drop(retry);
+        set_available(None);
+        assert!(status().available_version.is_none());
+        assert_eq!(
+            version_message("1.0.2", None),
+            "当前版本：1.0.2\n当前平台暂无可用更新。"
+        );
+        assert_eq!(
+            version_message("1.0.2", Some("2.0.0")),
+            "当前版本：1.0.2\n发现新版本：2.0.0"
+        );
+    }
+
+    #[test]
+    fn windows_update_is_unattended() {
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        assert_eq!(
+            config["plugins"]["updater"]["windows"]["installMode"],
+            "quiet"
+        );
+    }
 }
