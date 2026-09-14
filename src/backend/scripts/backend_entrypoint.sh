@@ -39,4 +39,11 @@ fi
 
 echo "[entrypoint] Starting API server..."
 
-exec uvicorn api.app:app --host 0.0.0.0 --port "${PORT:-3001}"
+# The worker count is resolved in Python rather than taken from the environment:
+# several deployment shapes must run exactly one worker no matter what was asked
+# for, and core/infra/worker_count.py is where that is decided and logged.
+# Exporting the result keeps uvicorn and the app reading the same number.
+export WEB_CONCURRENCY="$(python -m core.infra.worker_count)"
+echo "[entrypoint] uvicorn workers: ${WEB_CONCURRENCY}"
+
+exec uvicorn api.app:app --host 0.0.0.0 --port "${PORT:-3001}" --workers "${WEB_CONCURRENCY}"

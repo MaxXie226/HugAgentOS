@@ -5,6 +5,7 @@ import { SubagentCallRow } from './SubagentCallRow';
 import type { ComponentType } from 'react';
 import {
   LoadingOutlined,
+  PauseCircleOutlined,
   SearchOutlined,
   GlobalOutlined,
   FileTextOutlined,
@@ -363,7 +364,10 @@ function StandardToolCallRow({ tool, isStreaming }: ToolCallRowProps) {
           className={`jx-tcr-status${isStreaming ? ' jx-anim-statusIn' : ''}`}
         >
           {effectiveStatus === 'running' && <LoadingOutlined spin className="jx-tcr-icon jx-tcr-icon--running" />}
-          {effectiveStatus !== 'running' && !capability && <StepIcon name={tool.name} />}
+          {/* 结果始终没到的调用（被中止，或结果带着一个对不上任何卡片的 id 回来）挂
+              暂停标而不是工具图标——否则它和一次正常完成的调用长得一模一样。 */}
+          {effectiveStatus === 'interrupted' && <PauseCircleOutlined className="jx-tcr-icon" aria-label={t('未取得结果')} />}
+          {effectiveStatus !== 'running' && effectiveStatus !== 'interrupted' && !capability && <StepIcon name={tool.name} />}
         </span>
         {capability && <ToolCapabilityIcon capability={capability} />}
         <span className="jx-tcr-label">

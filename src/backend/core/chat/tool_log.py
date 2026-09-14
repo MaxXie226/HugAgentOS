@@ -7,9 +7,12 @@ the chat route (``api/routes/v1/chats.py``) and the background run executor
 """
 
 import json
+import logging
 import time
 from typing import Any, Dict, List, Optional
 from core.chat.display_bounds import bound_result_for_display
+
+logger = logging.getLogger(__name__)
 
 
 def now_ms() -> int:
@@ -260,11 +263,19 @@ def upsert_tool_call(tool_calls_log: list, tc: dict) -> None:
     this function, so the stamp is an invariant of the log rather than
     something each caller has to remember. A repeat event for a call already
     open backfills arguments and leaves the original stamp alone.
+
+    Only an entry that is still **open** absorbs the event. One log spans every
+    ReAct round of one assistant message, while a gateway that numbers its ids
+    per response hands out ``call_0`` again next round — merging into the closed
+    entry would have filed the second call's arguments and result on top of the
+    first one's, losing a whole call. Ids are made unique within a response one
+    layer up, in ``core/llm/tool_call_identity.py``; across responses the log is
+    where it has to hold.
     """
     tid = tc.get("tool_id")
     if tid:
         for existing in tool_calls_log:
-            if existing.get("tool_id") == tid:
+            if existing.get("tool_id") == tid and "result" not in existing:
                 if tc.get("tool_args"):
                     existing["tool_args"] = tc["tool_args"]
                 if tc.get("tool_display_name"):
@@ -310,13 +321,44 @@ def attach_tool_result(
     # was measured against another call's start stamp. The name fallback also
     # had nothing left to do — every call carries an id from AgentScope's
     # required ToolCallBlock.id (62,926 persisted calls checked, none missing).
-    for tc in tool_calls_log:
-        if tid and tc.get("tool_id") == tid:
-            return _settle_tool_call(tc, res, status)
+    #
+    # Among entries sharing an id, the open one is the call being closed: a
+    # gateway that restarts its numbering every round lets ``call_0`` name both
+    # an earlier finished call and the one running now.
+    if tid:
+        for tc in tool_calls_log:
+            if tc.get("tool_id") == tid and "result" not in tc:
+                return _settle_tool_call(tc, res, status)
+        for tc in tool_calls_log:
+            if tc.get("tool_id") == tid:
+                # Every entry with this id is already closed — a repeat delivery
+                # of a result that was recorded once.
+                return _settle_tool_call(tc, res, status)
     if tid or tn:
         # No opening entry to close (a result that arrived without its call):
         # record it, but leave duration unknown rather than inventing one.
-        tool_calls_log.append({"tool_name": tn, "tool_id": tid, "result": res, "status": status})
+        # ``call_missing`` is what tells a reader apart from a normal card: this
+        # one has a result and no arguments because its call never reached the
+        # log, not because the tool takes none. Without the flag the anomaly is
+        # indistinguishable from a healthy zero-argument call.
+        # A call the user steered away from is aborted before it ever reaches the
+        # wire, so having no entry to close is its normal shape — the flag still
+        # goes on the row, but it is not something an operator has to look at.
+        logger.log(
+            logging.INFO if status == "interrupted" else logging.WARNING,
+            "tool result %s (%s) has no call entry to close; recorded on its own",
+            tid or "<no id>",
+            tn or "<no name>",
+        )
+        tool_calls_log.append(
+            {
+                "tool_name": tn,
+                "tool_id": tid,
+                "result": res,
+                "status": status,
+                "call_missing": True,
+            }
+        )
     return None
 
 
@@ -326,13 +368,21 @@ _SUBSTEP_MAX_STEPS = 200  # max sub-steps stored per call_subagent card
 
 
 def _upsert_tool_step(steps: list, tid: Any, name: str, patch: dict) -> None:
-    """Merge a sub-tool step by toolId: on hit, merge patch (+name); otherwise append (subject to the step-count cap)."""
-    for s in steps:
-        if s.get("kind") == "tool" and s.get("toolId") == tid:
-            s.update(patch)
-            if name:
-                s["name"] = name
-            return
+    """Merge a sub-tool step by toolId: on hit, merge patch (+name); otherwise append (subject to the step-count cap).
+
+    A step is only merged when it has an id to be merged *by*. Without the
+    guard, ``toolId == tid`` also holds for two id-less steps, so two sub-tools
+    a sub-agent ran in parallel collapsed into a single step whose arguments and
+    output came from different calls. The frontend counterpart in
+    ``chatStream.ts::applySubagentEvent`` has always had this guard.
+    """
+    if tid:
+        for s in steps:
+            if s.get("kind") == "tool" and s.get("toolId") == tid:
+                s.update(patch)
+                if name:
+                    s["name"] = name
+                return
     if len(steps) < _SUBSTEP_MAX_STEPS:
         steps.append(
             {"kind": "tool", "toolId": tid, "name": name or "tool", "status": "running", **patch}
@@ -358,11 +408,13 @@ def attach_subagent_step(tool_calls_log: list, parent_tool_id: str, ev: dict) ->
     # 那张卡的展示名。
     if ev.get("sub_type") == "job_progress":
         return
-    entry = None
-    for tc in tool_calls_log:
-        if tc.get("tool_id") == parent_tool_id:
-            entry = tc
-            break
+    # 子步骤是父调用**还在跑的时候**冒出来的，所以同 id 的条目里认未收口的那条
+    # （同 upsert_tool_call：跨轮复用 id 的网关会让一个 id 同时指向上一轮已结束的
+    # 调用和这一轮正在跑的调用）。
+    candidates = [tc for tc in tool_calls_log if tc.get("tool_id") == parent_tool_id]
+    entry = next((tc for tc in candidates if "result" not in tc), None) or next(
+        iter(candidates), None
+    )
     if entry is None:
         return
 

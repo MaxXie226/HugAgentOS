@@ -66,45 +66,128 @@ def _runtime_role() -> str:
     return EXECUTION_PLANE if bridge_enabled() else SERVICE
 
 
+# Where a startup step belongs when the backend runs several uvicorn workers.
+#
+# ``_PER_WORKER`` is for work that either belongs to this process (in-process
+# caches, capability watchers, observability drains) **or already claims each
+# unit of work it takes**. The second kind matters more than it looks: the KB
+# index and wiki workers and the memory outbox each claim a row before working
+# it, and the daily schedulers take a day lock, so they are built to be run by
+# every worker and get faster for it. Marking those singleton would put a
+# coarser lock on top of a finer one and collapse a queue that N workers could
+# drain back down to one.
+#
+# ``_SINGLETON`` is for work with no such per-unit claim: outbound channel
+# connections, host sidecars, sweep loops over shared rows, one-shot recovery
+# passes and the seeding of default rows. There a second copy is not slower,
+# it is wrong — two seeders race on the same unique key, two recovery passes
+# fight over the same orphan rows. Gate-phase singletons run behind a boot
+# barrier so no worker starts serving against half-seeded state; deferred ones
+# run only in the worker currently holding the leader lease.
+_PER_WORKER = "per_worker"
+_SINGLETON = "singleton"
+
+
 def _startup_steps():
+    """Every startup step, with what stops it and where it belongs.
+
+    ``stop`` is the handler that shuts the step down, or ``None`` for the
+    one-shot steps that leave nothing running. Keeping it in the row rather
+    than in a separate list is what stops the two from drifting: a singleton
+    added later cannot be started by the leader and then forgotten when that
+    leader loses the role.
+    """
     return (
-        # (step, gate, roles)
-        (_startup_ensure_tables, True, _ALL_ROLES),
-        (_startup_watch_capability_changes, True, _ALL_ROLES),
-        (_startup_desktop_observability, True, _ALL_ROLES),
-        (_startup_seed_ce_admin, True, _ALL_ROLES),
-        (_startup_seed_page_config, True, _ALL_ROLES),
-        (_startup_seed_prompt_versions, True, _ALL_ROLES),
-        (_startup_seed_roles, True, _ALL_ROLES),
-        (_startup_seed_mcp_servers, True, _ALL_ROLES),
-        (_startup_seed_default_plugins, True, _ALL_ROLES),
-        (_startup_upgrade_sites_plugin, True, _ALL_ROLES),
+        # (step, stop, gate, roles, scope)
+        (_startup_ensure_tables, None, True, _ALL_ROLES, _SINGLETON),
+        (_startup_watch_capability_changes, None, True, _ALL_ROLES, _PER_WORKER),
+        (_startup_desktop_observability, None, True, _ALL_ROLES, _PER_WORKER),
+        (_startup_seed_ce_admin, None, True, _ALL_ROLES, _SINGLETON),
+        # One-time and idempotent: every worker rewriting the artifact index
+        # would duplicate the work and race on the same records.
+        (_startup_prepare_artifact_records, None, False, _ALL_ROLES, _SINGLETON),
+        (_startup_seed_page_config, None, True, _ALL_ROLES, _SINGLETON),
+        (_startup_seed_prompt_versions, None, True, _ALL_ROLES, _SINGLETON),
+        (_startup_seed_roles, None, True, _ALL_ROLES, _SINGLETON),
+        (_startup_seed_mcp_servers, None, True, _ALL_ROLES, _SINGLETON),
+        (_startup_seed_default_plugins, None, True, _ALL_ROLES, _SINGLETON),
+        (_startup_upgrade_sites_plugin, None, True, _ALL_ROLES, _SINGLETON),
         # Runs after the plugin seeding/upgrade steps above, which rewrite manifests
         # and are exactly what can leave a server with display-only tool entries.
-        (_startup_backfill_tool_schemas, False, _ALL_ROLES),
-        (_startup_local_sidecars, True, _ALL_ROLES),
-        (_startup_recover_chat_runs, True, _ALL_ROLES),
-        (_startup_resume_loops, False, _ALL_ROLES),
-        (_startup_recover_jobs, False, _ALL_ROLES),
-        (_startup_orphan_job_reaper, False, _ALL_ROLES),
-        (_startup_stale_run_reaper, False, _ALL_ROLES),
-        (_startup_warm_sandbox_pool, False, _ALL_ROLES),
-        (_startup_idle_session_reaper, False, _ALL_ROLES),
-        (_startup_mcp_market_monitor, False, _SERVICE_ONLY),
-        (_startup_recover_datasource_sidecars, False, _SERVICE_ONLY),
-        (_startup_preload, False, _ALL_ROLES),
-        (_startup_automation_scheduler, False, _ALL_ROLES),
-        (_startup_kb_wiki_worker, False, _SERVICE_ONLY),
-        (_startup_kb_index_worker, False, _SERVICE_ONLY),
-        (_startup_distillation_scheduler, False, _SERVICE_ONLY),
-        (_startup_evolution_scheduler, False, _SERVICE_ONLY),
-        (_startup_memory_ttl_scheduler, False, _ALL_ROLES),
-        (_startup_memory_outbox_worker, False, _ALL_ROLES),
-        (_startup_recover_persona_distill_jobs, False, _SERVICE_ONLY),
-        (_startup_warmup_memory, False, _ALL_ROLES),
-        (_startup_channel_manager, False, _SERVICE_ONLY),
-        (_startup_channel_desktop, False, _ALL_ROLES),
+        (_startup_backfill_tool_schemas, None, False, _ALL_ROLES, _SINGLETON),
+        (_startup_local_sidecars, _shutdown_local_sidecars, True, _ALL_ROLES, _SINGLETON),
+        (_startup_recover_chat_runs, None, True, _ALL_ROLES, _SINGLETON),
+        (_startup_resume_loops, None, False, _ALL_ROLES, _SINGLETON),
+        (_startup_recover_jobs, None, False, _ALL_ROLES, _SINGLETON),
+        (_startup_orphan_job_reaper, _shutdown_orphan_job_reaper, False, _ALL_ROLES, _SINGLETON),
+        (_startup_stale_run_reaper, _shutdown_stale_run_reaper, False, _ALL_ROLES, _SINGLETON),
+        (_startup_warm_sandbox_pool, None, False, _ALL_ROLES, _SINGLETON),
+        (
+            _startup_idle_session_reaper,
+            _shutdown_idle_session_reaper,
+            False,
+            _ALL_ROLES,
+            _SINGLETON,
+        ),
+        (
+            _startup_mcp_market_monitor,
+            _shutdown_mcp_market_monitor,
+            False,
+            _SERVICE_ONLY,
+            _SINGLETON,
+        ),
+        (
+            _startup_recover_datasource_sidecars,
+            _shutdown_datasource_sidecar_recovery,
+            False,
+            _SERVICE_ONLY,
+            _SINGLETON,
+        ),
+        (_startup_preload, None, False, _ALL_ROLES, _PER_WORKER),
+        (
+            _startup_automation_scheduler,
+            _shutdown_automation_scheduler,
+            False,
+            _ALL_ROLES,
+            _SINGLETON,
+        ),
+        # The next six claim each unit of work before doing it — a queued
+        # document, an outbox row, a day — so every worker may run them and the
+        # queue-shaped ones drain faster for it. See ``_PER_WORKER`` above.
+        (_startup_kb_wiki_worker, _shutdown_kb_wiki_worker, False, _SERVICE_ONLY, _PER_WORKER),
+        (_startup_kb_index_worker, _shutdown_kb_index_worker, False, _SERVICE_ONLY, _PER_WORKER),
+        (_startup_distillation_scheduler, None, False, _SERVICE_ONLY, _PER_WORKER),
+        (_startup_evolution_scheduler, None, False, _SERVICE_ONLY, _PER_WORKER),
+        (_startup_memory_ttl_scheduler, None, False, _ALL_ROLES, _PER_WORKER),
+        (
+            _startup_memory_outbox_worker,
+            _shutdown_memory_outbox_worker,
+            False,
+            _ALL_ROLES,
+            _PER_WORKER,
+        ),
+        (_startup_recover_persona_distill_jobs, None, False, _SERVICE_ONLY, _SINGLETON),
+        (_startup_warmup_memory, None, False, _ALL_ROLES, _PER_WORKER),
+        (_startup_channel_manager, _shutdown_channel_manager, False, _SERVICE_ONLY, _SINGLETON),
+        (_startup_channel_desktop, _shutdown_channel_desktop, False, _ALL_ROLES, _SINGLETON),
     )
+
+
+async def _stop_singleton_work() -> None:
+    """Stop the singleton loops this worker started while it held the lease.
+
+    Only reached when a worker that *was* the leader failed to renew for a
+    whole lease — it stalled for tens of seconds and another worker has taken
+    the role. The handlers come from the registry, so this cannot stop a
+    different set than the one the leader started.
+    """
+    for _step, stop, _gate, _roles, scope in _startup_steps():
+        if scope is not _SINGLETON or stop is None:
+            continue
+        try:
+            await stop()
+        except Exception as exc:  # noqa: BLE001 - one failure must not skip the rest
+            logger.warning("leader_stop_failed", step=stop.__name__, error=str(exc))
 
 
 async def _run_startup_steps(steps) -> None:
@@ -118,21 +201,49 @@ async def lifespan(app: FastAPI):
     import contextlib
     import time
 
+    from core.infra.leader import Leadership, coordination_required, run_once
+
     role = _runtime_role()
-    selected = [(step, gate) for step, gate, roles in _startup_steps() if role in roles]
+    selected = [
+        (step, gate, scope) for step, _stop, gate, roles, scope in _startup_steps() if role in roles
+    ]
     started = time.monotonic()
-    await _run_startup_steps(step for step, gate in selected if gate)
+    # Gate phase: a singleton step runs in one worker while the others wait for
+    # it, so nobody begins serving against half-seeded state.
+    for step, gate, scope in selected:
+        if not gate:
+            continue
+        if scope is _SINGLETON:
+            await run_once(step.__name__, step)
+        else:
+            await step()
+    deferred = [(step, scope) for step, gate, scope in selected if not gate]
     logger.info(
-        "[startup] role=%s gate ready in %.2fs; %d step(s) continue in background",
-        role,
-        time.monotonic() - started,
-        sum(1 for _, gate in selected if not gate),
+        "startup_gate_ready",
+        role=role,
+        workers=os.getenv("WEB_CONCURRENCY", "1"),
+        seconds=round(time.monotonic() - started, 2),
+        deferred_steps=len(deferred),
     )
     app.state.deferred_startup = asyncio.create_task(
-        _run_startup_steps([step for step, gate in selected if not gate])
+        _run_startup_steps([step for step, scope in deferred if scope is _PER_WORKER])
     )
+
+    # Deferred singletons belong to whichever worker holds the lease. With one
+    # worker that is decided without touching any store, so this path is what
+    # it always was; with several, exactly one gets them, and if that worker
+    # dies the lease lapses and the next one picks them up.
+    singleton_steps = [step for step, scope in deferred if scope is _SINGLETON]
+    leadership = Leadership("backend")
+    leadership.start(
+        on_elected=lambda: _run_startup_steps(singleton_steps),
+        on_deposed=_stop_singleton_work,
+    )
+    if coordination_required():
+        logger.info("startup_singleton_steps_gated", steps=len(singleton_steps))
     yield
     # ── shutdown ──
+    await leadership.stop()
     deferred = getattr(app.state, "deferred_startup", None)
     if deferred is not None and not deferred.done():
         deferred.cancel()
@@ -142,6 +253,7 @@ async def lifespan(app: FastAPI):
     await _shutdown_memory_outbox_worker()
     await _shutdown_desktop_observability()
     from core.services.desktop_gateway_observability import drain
+
     await drain()
     await _shutdown_orphan_job_reaper()
     await _shutdown_kb_wiki_worker()
@@ -603,6 +715,27 @@ async def _shutdown_stale_run_reaper():
             await task
 
 
+async def _shutdown_automation_scheduler():
+    """Stop the automation scheduler, whether the process is exiting or this
+    worker just lost the leader role. Idempotent: the scheduler's own ``stop``
+    is safe to call on an already-stopped scheduler."""
+    global _automation_scheduler
+    if _automation_scheduler is not None:
+        await _automation_scheduler.stop()
+
+
+async def _shutdown_idle_session_reaper():
+    import asyncio
+    import contextlib
+
+    global _idle_reaper_task
+    if _idle_reaper_task is not None:
+        _idle_reaper_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await _idle_reaper_task
+        _idle_reaper_task = None
+
+
 async def _shutdown_orphan_job_reaper():
     import asyncio
     import contextlib
@@ -680,6 +813,25 @@ async def _startup_idle_session_reaper():
         logger.info("[startup] idle sandbox-session reaper started")
     except Exception as exc:  # noqa: BLE001
         logger.warning("[startup] idle session reaper failed to start: %s", exc)
+
+
+async def _startup_prepare_artifact_records():
+    """Split a legacy monolithic artifact index, or restore records from OSS.
+
+    One-time and idempotent. It runs here rather than lazily on first lookup so
+    that no user request ever pays for it — the monolithic index reached 12.9 MB
+    in production and rewriting it per artifact was blocking the whole backend.
+    """
+    try:
+        import asyncio
+
+        from core.artifacts.store import prepare_records
+
+        written = await asyncio.to_thread(prepare_records)
+        if written:
+            logger.info("[startup] artifact records prepared: %d written", written)
+    except Exception as exc:  # noqa: BLE001 — never block startup on this
+        logger.warning("[startup] artifact record migration skipped: %s", exc)
 
 
 async def _startup_seed_page_config():
@@ -831,6 +983,7 @@ async def _shutdown_mcp_market_monitor():
 async def _startup_upgrade_sites_plugin():
     """Refresh installed builtin site instructions in both cloud and local editions."""
     import asyncio
+
     from core.db.engine import SessionLocal
     from core.services.site_plugin_upgrade import upgrade_builtin_sites
 
@@ -1303,13 +1456,12 @@ async def _startup_warmup_memory():
 
 async def _shutdown_pools():
     """Close MCP connection pool, KB HTTP server, automation scheduler, and Redis on shutdown."""
-    # Stop automation scheduler
-    global _automation_scheduler
-    if _automation_scheduler is not None:
-        try:
-            await _automation_scheduler.stop()
-        except Exception as e:
-            logger.warning("automation_scheduler_shutdown_error", error=str(e))
+    # Stop automation scheduler — same handler the leader path calls, so a
+    # deposed leader and an exiting process cannot stop different things.
+    try:
+        await _shutdown_automation_scheduler()
+    except Exception as e:
+        logger.warning("automation_scheduler_shutdown_error", error=str(e))
     # Stop distillation scheduler
     global _distillation_scheduler
     if _distillation_scheduler is not None:
@@ -1318,12 +1470,10 @@ async def _shutdown_pools():
         except Exception as e:
             logger.warning("distillation_scheduler_shutdown_error", error=str(e))
     # Stop idle sandbox-session reaper
-    global _idle_reaper_task
-    if _idle_reaper_task is not None:
-        try:
-            _idle_reaper_task.cancel()
-        except Exception as e:
-            logger.warning("idle_reaper_shutdown_error", error=str(e))
+    try:
+        await _shutdown_idle_session_reaper()
+    except Exception as e:
+        logger.warning("idle_reaper_shutdown_error", error=str(e))
     try:
         from core.llm.mcp_pool import MCPConnectionPool
 
@@ -1352,25 +1502,26 @@ def main():
     uvicorn.run(app, host="0.0.0.0", port=port)
 
 
-
-
-
 _desktop_sync_worker = None
 _desktop_capture_remove = None
+
 
 async def _startup_desktop_observability():
     global _desktop_sync_worker, _desktop_capture_remove
     from core.auth.desktop_bridge import bridge_enabled
+
     if not bridge_enabled():
         return
     from core.db.engine import SessionLocal
     from core.services.desktop_cloud_bridge import get_identity_state
     from core.services.desktop_observability_sync import DesktopSyncWorker, install_capture
+
     if _desktop_capture_remove is None:
         _desktop_capture_remove = install_capture(SessionLocal, get_identity_state)
     if _desktop_sync_worker is None:
         _desktop_sync_worker = DesktopSyncWorker(SessionLocal)
         _desktop_sync_worker.start()
+
 
 async def _shutdown_desktop_observability():
     global _desktop_sync_worker, _desktop_capture_remove
@@ -1381,19 +1532,25 @@ async def _shutdown_desktop_observability():
         _desktop_capture_remove()
         _desktop_capture_remove = None
 
+
 _channel_desktop_worker = None
+
 
 async def _startup_channel_desktop():
     global _channel_desktop_worker
-    from core.db.engine import SessionLocal
     from core.auth.desktop_bridge import bridge_enabled
+    from core.db.engine import SessionLocal
+
     if bridge_enabled():
         from core.services.channel_desktop_worker import ChannelDesktopWorker
+
         _channel_desktop_worker = ChannelDesktopWorker(SessionLocal)
     else:
         from core.services.channel_relay_dispatch import ChannelRelayReaper
+
         _channel_desktop_worker = ChannelRelayReaper(SessionLocal)
     _channel_desktop_worker.start()
+
 
 async def _shutdown_channel_desktop():
     global _channel_desktop_worker

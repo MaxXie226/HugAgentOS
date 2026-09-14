@@ -12,7 +12,7 @@ def main() -> int:
         from fastapi import HTTPException
         from starlette.responses import FileResponse
         from api.routes.files import download_file
-        from api.routes.v1.artifacts import extract_file_ref, resolve_artifact_storage_key
+        from core.content.artifact_refs import extract_file_ref, resolve_artifact_storage_key
         from core.db.engine import SessionLocal
     except ModuleNotFoundError as e:
         print(f"artifacts_selftest: SKIP (missing dependency: {e})")
@@ -21,13 +21,11 @@ def main() -> int:
     import core.artifacts.store as store
 
     original_store_dir = store._STORE_DIR  # type: ignore[attr-defined]
-    original_index_path = store._INDEX_PATH  # type: ignore[attr-defined]
 
     with tempfile.TemporaryDirectory() as td:
         base = Path(td) / "artifacts"
         try:
             store._STORE_DIR = base  # type: ignore[attr-defined]
-            store._INDEX_PATH = base / "index.json"  # type: ignore[attr-defined]
 
             item = store.save_artifact_bytes(
                 content=b"demo",
@@ -69,7 +67,6 @@ def main() -> int:
                     assert e.status_code == 404
         finally:
             store._STORE_DIR = original_store_dir  # type: ignore[attr-defined]
-            store._INDEX_PATH = original_index_path  # type: ignore[attr-defined]
 
     print("artifacts_selftest: OK")
     return 0

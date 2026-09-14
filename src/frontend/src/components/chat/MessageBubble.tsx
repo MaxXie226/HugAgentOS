@@ -157,6 +157,8 @@ export const MessageBubble = memo(function MessageBubble({ m, messageIndex, curr
   const toggleShareMessageUid = useChatStore((s) => s.toggleShareMessageUid);
   const startShareSelectionWithAll = useChatStore((s) => s.startShareSelectionWithAll);
   const setQuotedFollowUp = useChatStore((s) => s.setQuotedFollowUp);
+  const editingMessageUid = useChatStore((s) => s.editingMessageUid);
+  const setEditingMessageUid = useChatStore((s) => s.setEditingMessageUid);
   const setDetailModal = useUIStore((s) => s.setDetailModal);
   const dispatchProcessVisible = useUIStore((s) => s.dispatchProcessVisible);
   // 引用解析只往前找（`resolveConversationCitations` 跳过当前这条、在其余消息里
@@ -174,7 +176,6 @@ export const MessageBubble = memo(function MessageBubble({ m, messageIndex, curr
         ? t('图像理解中（{n} 张）…', { n: visionReadingCount })
         : t('图像理解中…'))
     : undefined;
-  const { editingMessageUid, setEditingMessageUid } = useChatStore();
   const [editText, setEditText] = useState('');
   const shareSelected = selectedShareMessageUids.has(m.uid);
   const isEditing = editingMessageUid === m.uid;
@@ -233,7 +234,7 @@ export const MessageBubble = memo(function MessageBubble({ m, messageIndex, curr
   // Anchor the stall clock to the message's persisted `lastActivityTs` so the
   // "正在准备调用工具…" timer keeps counting from the real start even after a
   // session switch or page refresh remounts this component.
-  const stall = useStallDetector(stallSignature, 2500, m.lastActivityTs);
+  const stall = useStallDetector(stallSignature, 2500, m.lastActivityTs, !!m.isStreaming);
   const noToolRunning = !anyToolRunning(m.toolCalls || []);
   const pendingWaiting = !!m.isStreaming && noToolRunning && (!!m.toolPending || stall.waiting);
 

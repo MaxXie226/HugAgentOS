@@ -20,6 +20,8 @@ import threading
 import time
 from typing import Optional, Protocol, runtime_checkable
 
+from redis.exceptions import WatchError
+
 from core.infra.redis import get_redis, redis_configured
 
 
@@ -62,6 +64,16 @@ class EphemeralState(Protocol):
     async def claim(self, key: str, *, ttl: int) -> bool:
         """Take a mutex; True only for the caller that created the entry."""
 
+    async def hold(self, key: str, token: str, *, ttl: int) -> bool:
+        """Take or extend a mutex owned by *token*; True while it is ours.
+
+        ``claim`` can only take a mutex, never extend one, so a holder that must
+        keep a lock alive across many TTLs has no way to say "still me".
+        Renewing through ``put`` would instead let a holder whose lease already
+        lapsed overwrite whoever legitimately took it. ``hold`` expresses both
+        steps against one ownership token, which is what a leader lease needs.
+        """
+
 
 class RedisEphemeralState:
     """Redis-backed implementation for deployments that have one."""
@@ -94,6 +106,35 @@ class RedisEphemeralState:
 
     async def claim(self, key: str, *, ttl: int) -> bool:
         return bool(await get_redis().set(key, "1", ex=_seconds(ttl), nx=True))
+
+    async def hold(self, key: str, token: str, *, ttl: int) -> bool:
+        ttl_ms = _seconds(ttl) * 1000
+        redis = get_redis()
+        if await redis.set(key, token, px=ttl_ms, nx=True):
+            return True
+        # Extending has to be atomic with the check that we still own it.
+        # Reading the owner and then extending as two plain commands leaves a
+        # window where the lease lapses in between, and the extend would
+        # resurrect a lock somebody else now holds — two leaders, the one
+        # outcome this must never produce. WATCH makes EXEC fail if the key
+        # moved, which is the same answer as "not ours".
+        #
+        # A Lua script would say this in one round trip, but the test double
+        # this project pins its Redis behaviour against (see the fakeredis note
+        # in requirements.txt) does not run Lua, and an operation that only the
+        # in-process backend can be tested on is worse than one extra round
+        # trip on a call that happens a few times a minute.
+        async with redis.pipeline() as pipe:
+            try:
+                await pipe.watch(key)
+                if await pipe.get(key) != token:
+                    return False
+                pipe.multi()
+                pipe.pexpire(key, ttl_ms)
+                await pipe.execute()
+                return True
+            except WatchError:
+                return False
 
 
 class LocalEphemeralState:
@@ -164,6 +205,17 @@ class LocalEphemeralState:
             if key in self._entries:
                 return False
             self._entries[key] = (now + ttl, "1")
+            return True
+
+    async def hold(self, key: str, token: str, *, ttl: int) -> bool:
+        ttl = _seconds(ttl)
+        now = time.time()
+        with self._lock:
+            self._prune(now)
+            entry = self._entries.get(key)
+            if entry is not None and entry[1] != token:
+                return False
+            self._entries[key] = (now + ttl, token)
             return True
 
 

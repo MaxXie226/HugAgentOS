@@ -317,7 +317,6 @@ def test_artifact_store_persists_from_file_without_byte_upload(monkeypatch, tmp_
     source.write_bytes(b"streamed-pdf")
     artifact_dir = tmp_path / "artifacts"
     monkeypatch.setattr(store, "_STORE_DIR", artifact_dir)
-    monkeypatch.setattr(store, "_INDEX_PATH", artifact_dir / "index.json")
     monkeypatch.setattr(store, "_storage_type", lambda: "local")
 
     item = store.save_artifact_file(
@@ -355,7 +354,6 @@ def test_artifact_store_uses_file_upload_for_oss(monkeypatch, tmp_path):
 
     storage = _Storage()
     monkeypatch.setattr(store, "_STORE_DIR", artifact_dir)
-    monkeypatch.setattr(store, "_INDEX_PATH", artifact_dir / "index.json")
     monkeypatch.setattr(store, "_storage_type", lambda: "oss")
     monkeypatch.setattr(store, "_get_oss_storage", lambda: storage)
 
@@ -368,7 +366,8 @@ def test_artifact_store_uses_file_upload_for_oss(monkeypatch, tmp_path):
 
     assert uploaded_files == [(str(source), item["storage_key"])]
     assert item["path"] is None
-    assert uploaded_bytes and uploaded_bytes[-1][1] == "artifacts/_index.json"
+    # 登记只镜像这一条记录，不再整份重传索引
+    assert uploaded_bytes and uploaded_bytes[-1][1] == store._record_oss_key(item["file_id"])
     assert all(content != b"streamed-pdf" for content, _ in uploaded_bytes)
 
 

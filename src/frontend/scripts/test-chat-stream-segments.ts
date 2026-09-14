@@ -12,7 +12,7 @@ import { extractCodeFromStreamingArgs } from '../src/utils/codeExecParser';
 import { buildHistorySegments } from '../src/utils/segments';
 import { refreshTargetForTool } from '../src/utils/toolRefresh';
 import { parseAppliedQueueHandoff, parseQueuedRunHandoff } from '../src/utils/streamHandoff';
-import { resolveToolCardIndex } from '../src/utils/toolMatching';
+import { resolveSubagentParentIndex, resolveToolCardIndex, toolCardIndexById } from '../src/utils/toolMatching';
 
 function tool(toolIndex: number): MessageSegment {
   return { type: 'tool', toolIndex };
@@ -485,6 +485,50 @@ function tool(toolIndex: number): MessageSegment {
   // 没 id 也没同名在跑：只有显式允许时才退到"任何还在跑的"。
   assert.equal(resolveToolCardIndex(settled, undefined, 'grep'), -1);
   assert.equal(resolveToolCardIndex(settled, undefined, 'grep', { fallbackToAnyRunning: true }), 1);
+}
+
+{
+  // 子智能体事件同理：报了 parent_tool_id 就只认它。并行跑两个子智能体时，"最后一张
+  // call_subagent 卡"同时对应两个还在跑的子智能体，按名字认领会把 A 的思考和子工具
+  // 塞进 B 的卡里。
+  const cards = [
+    { id: 'sub-a', name: 'call_subagent', status: 'running' },
+    { id: 'sub-b', name: 'call_subagent', status: 'running' },
+  ];
+  assert.equal(resolveSubagentParentIndex(cards, 'sub-a', 'call_subagent'), 0);
+  assert.equal(resolveSubagentParentIndex(cards, 'sub-b', 'call_subagent'), 1);
+  assert.equal(
+    resolveSubagentParentIndex(cards, 'sub-zzz', 'call_subagent'),
+    -1,
+    'id 认不到时丢弃这条事件，不得贴到同名的另一个子智能体卡上',
+  );
+
+  // 批量作业的 job_progress 拿不到 CURRENT_TOOL_CALL_ID 时就是没带 id 的形状，
+  // 它除了 run_job 这个名字没有别的线索——这条兜底必须留着。
+  const jobCards = [
+    { id: 'sub-a', name: 'call_subagent', status: 'running' },
+    { id: 'job-1', name: 'run_job', status: 'running' },
+  ];
+  assert.equal(resolveSubagentParentIndex(jobCards, undefined, 'run_job'), 1);
+}
+
+{
+  // 同一个 id 出现在两张卡上（按响应重新编号的网关下一轮会再发一次 call_0）：
+  // 认还在跑的那张，别把上一轮已经跑完的结果盖掉。
+  const reused = [
+    { id: 'call_0', name: 'bash', status: 'success' },
+    { id: 'call_0', name: 'bash', status: 'running' },
+  ];
+  assert.equal(toolCardIndexById(reused, 'call_0'), 1, '认未收口的那张卡');
+  assert.equal(resolveToolCardIndex(reused, 'call_0', 'bash'), 1);
+
+  // 全都收口了 → 退回第一张（同一个结果重复送达，内容一样）。
+  const settled = [
+    { id: 'call_0', name: 'bash', status: 'success' },
+    { id: 'call_0', name: 'bash', status: 'error' },
+  ];
+  assert.equal(toolCardIndexById(settled, 'call_0'), 0);
+  assert.equal(toolCardIndexById(settled, 'call_9'), -1);
 }
 
 console.log('chat stream segment tests passed');

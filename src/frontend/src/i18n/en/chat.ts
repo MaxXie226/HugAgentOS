@@ -294,6 +294,7 @@ export const CHAT_DICT: Record<string, string> = {
   '{k} 个文件超过 {n} MB，已跳过': '{k} files exceed {n} MB and were skipped',
   '「{name}」上传失败，请重试': 'Failed to upload "{name}" — please try again',
   '已中断': 'Interrupted',
+  '未取得结果': 'No result received',
   '编辑后将丢弃后续对话': 'Editing will discard the rest of this conversation',
   '这条消息之后还有 {n} 轮问答，编辑重发会把它们一并删除且无法恢复。确定继续吗？':
     'There are {n} more exchanges after this message. Editing and resending deletes them permanently. Continue?',

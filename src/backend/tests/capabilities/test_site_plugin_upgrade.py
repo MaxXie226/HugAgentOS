@@ -88,7 +88,7 @@ def test_site_upgrade_is_an_all_role_startup_step(local_project, monkeypatch):
         row.version = "1.0.0"
         db.commit()
     app = importlib.import_module("api.app")
-    _, gate, roles = next(
+    _step, _stop, gate, roles, _scope = next(
         s for s in app._startup_steps() if s[0] is app._startup_upgrade_sites_plugin
     )
     assert gate is True and roles == frozenset({app.SERVICE, app.EXECUTION_PLANE})
