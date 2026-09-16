@@ -93,6 +93,16 @@
   justify-content: flex-end;
 }
 
+.jx-sites-passwordRow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+.jx-sites-passwordState {
+  color: var(--color-text-secondary);
+}
+
 .jx-sites-payload {
   font-family:var(--font-family-mono);
   font-size: 12px;

@@ -5,10 +5,14 @@ import { join } from "node:path";
 export const DESKTOP_RUNTIME_INPUT_FILES = Object.freeze([
   "desktop/native-tools.json",
   "desktop/licenses/OfficeCLI-LICENSE.txt",
+  "desktop/licenses/Pandoc-COPYING.md",
+  "desktop/licenses/Office-runtime-NOTICES.txt",
+  "desktop/licenses/Git-Bash-NOTICES.txt",
   "desktop/scripts/build-runtime.mjs",
   "desktop/scripts/desktop-dependencies.mjs",
   "desktop/scripts/install-native-tools.py",
   "desktop/scripts/runtime-smoke.py",
+  "src/backend/services/script_runner_service/runtime_tools.py",
   "desktop/scripts/create-runtime-archive.py",
 ]);
 

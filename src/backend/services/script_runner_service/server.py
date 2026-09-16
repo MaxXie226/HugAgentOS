@@ -38,8 +38,12 @@ logger = logging.getLogger("script-runner")
 
 if __package__:
     from .workspace_paths import session_root, resolve_path
+    from .runtime_tools import resolve_bash_executable as _resolve_bash_executable
+    from .runtime_tools import windows_tool_path_entries
 else:
     from workspace_paths import session_root, resolve_path
+    from runtime_tools import resolve_bash_executable as _resolve_bash_executable
+    from runtime_tools import windows_tool_path_entries
 
 app = FastAPI(title="HugAgentOS Script Runner", docs_url=None, redoc_url=None)
 
@@ -320,32 +324,6 @@ def _session_workspace(
     return workspace
 
 
-def _resolve_bash_executable() -> Optional[str]:
-    """Find a native Bash, excluding Windows' WSL launcher stubs."""
-    configured = os.getenv("SCRIPT_RUNNER_BASH", "").strip()
-    candidates = [configured, shutil.which("bash") or ""]
-    if os.name == "nt":
-        for root in (
-            os.getenv("ProgramFiles", ""),
-            os.getenv("ProgramFiles(x86)", ""),
-            str(Path(os.getenv("LOCALAPPDATA", "")) / "Programs"),
-        ):
-            if root:
-                candidates.append(str(Path(root) / "Git" / "bin" / "bash.exe"))
-
-    for candidate in candidates:
-        if not candidate or not Path(candidate).is_file():
-            continue
-        normalized = candidate.replace("/", "\\").casefold()
-        if os.name == "nt" and (
-            "\\windows\\system32\\bash.exe" in normalized
-            or "\\microsoft\\windowsapps\\bash.exe" in normalized
-        ):
-            continue
-        return candidate
-    return None
-
-
 _BASH_EXECUTABLE = _resolve_bash_executable()
 
 INTERPRETERS = {
@@ -437,24 +415,7 @@ def _local_safe_path_entries() -> list[str]:
         )
 
     if os.name == "nt":
-        system_root = os.getenv("SYSTEMROOT") or os.getenv("WINDIR")
-        if system_root:
-            entries.extend(
-                [
-                    str(Path(system_root)),
-                    str(Path(system_root) / "System32"),
-                    str(Path(system_root) / "System32" / "WindowsPowerShell" / "v1.0"),
-                ]
-            )
-        if _BASH_EXECUTABLE:
-            git_bin = Path(_BASH_EXECUTABLE).parent
-            entries.extend(
-                [
-                    str(git_bin),
-                    str(git_bin.parent / "usr" / "bin"),
-                    str(git_bin.parent / "cmd"),
-                ]
-            )
+        entries.extend(windows_tool_path_entries(_BASH_EXECUTABLE))
 
     binaries = ("node", "npm", "npx")
     if os.name != "nt":

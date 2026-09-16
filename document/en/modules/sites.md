@@ -1,6 +1,6 @@
 # Sites (Build Websites in Chat, Hosted by the Platform)
 
-> Last updated: 2026-09-10
+> Last updated: 2026-09-15
 
 **Sites** lets users describe what they need in a conversation and have the agent generate a complete static website and publish it in one step — hosted directly by the platform, accessible to anyone with the link, and updatable later through further conversation. The full pipeline: multi-file site generated in the sandbox → published via the `publish_site` tool → served publicly through an nginx-proxied backend hosting route.
 
@@ -9,8 +9,8 @@ Sites is a **Community Edition (CE)** feature, located in the **Lab** panel (req
 ## How to use
 
 1. Ask in chat, e.g. "Build a product intro website and publish it." The agent generates a complete static site in the sandbox (HTML/CSS/JS/images with an `index.html` entry), calls the `publish_site` tool, and delivers the access URL (like `/site/<slug>/`) in the conversation.
-2. Open **Lab → Sites** to manage all your sites: open, copy link, edit title / address / visibility, delete.
-3. To modify a published site, just continue describing changes in chat — the agent republishes with the same `site_id`; the URL stays the same and the version increments.
+2. Open **Lab → Sites** to manage all your sites: open, copy link, edit title / address / visibility / access password, delete.
+3. To modify a published site, describe the changes in **any** conversation — you don't have to return to the original one. The agent first calls the `list_sites` tool to look up the site ID and source directory, then republishes with that `site_id`; the URL stays the same and the version increments. When the account has several sites and the request is ambiguous, the agent asks which one to change.
 
 ## Visibility
 
@@ -19,6 +19,18 @@ Sites is a **Community Edition (CE)** feature, located in the **Lab** panel (req
 | Public (default) | Anyone with the link can view, no sign-in required |
 | Team | Visible to members of the selected team when signed in |
 | Private | Visible only to the site owner when signed in |
+
+## Access password
+
+The access password is a gate that is independent of visibility: visibility decides *which signed-in users may see the site*, the password decides *whether someone holding the link must verify first*. Once a public site has a password, visitors first land on a **unified password page** — every password-protected site shares this one page, rendered directly by the backend without any frontend build dependency.
+
+- Set, change or turn it off under **Site management → Settings → Access password**; only the site creator (or the project admin for team-project sites) can do so.
+- After a successful unlock the browser holds a credential cookie scoped to that one site, valid for 12 hours; after that the password is required again.
+- Changing or removing the password immediately invalidates every credential already issued.
+- Anyone who can manage the site skips the gate once signed in.
+- The password is stored only as an Argon2id hash — the plaintext is never persisted nor returned by the API, which only reports *whether* a password is set.
+- Unlock attempts are rate-limited per IP + site (10 per 5 minutes per backend process; with multiple workers the effective ceiling scales with the worker count).
+- The in-site `__api/kv` and `__api/forms` endpoints are not behind the password gate: site scripts run on a sandboxed opaque origin and send no credentials, so gating them would break in-site capabilities entirely; that data is in any case readable by anyone who opens the page, and authorization there still follows visibility.
 
 ## Versions & rollback
 
@@ -32,6 +44,12 @@ Sites are more than static pages — the platform ships two built-in in-site API
 - **Form collection** (comments, signups, feedback): `POST __api/forms/<form_key>` (JSON, ≤ 8KB each, ≤ 5000 per site). Owners view/clear submissions in **Site management → Form data**, or **export CSV to My Space** in one click.
 
 `__api/` is a reserved prefix (site files cannot use it); write operations are rate-limited.
+
+KV acts as the site's own lightweight database. Owners can inspect and change this data through chat ("how many signups so far?", "swap the homepage figures for this month's") at any time, **without republishing the site**. The `__api/` endpoints are for in-site JS; the agent uses the `site_kv_list` / `site_kv_get` / `site_kv_set` / `site_kv_delete` tools shipped with the Sites plugin, authorized by site ownership and bound by the same quotas as the in-site API. KV entries are also visible and deletable under **Site management → KV**.
+
+> **Change data, or republish?** It depends on whether you are changing data or the page itself: a value the page already reads from KV → change KV and it takes effect immediately; layout, sections, chart types, interaction logic → edit the source and republish. If a value is currently hard-coded in the page and you expect to change it often, have the agent rewire that spot to read from KV and republish once — after that every update is a data change only.
+>
+> Note that writes to `__api/kv` on a public site require no identity (only rate limiting), so KV content is rewritable by visitors; keep secrets and tamper-sensitive content in the site source.
 
 ## View statistics
 
@@ -54,12 +72,15 @@ The platform counts HTML page views per site (asset files excluded), shown on th
 
 | Part | Location |
 |---|---|
-| Publish tool | `src/backend/core/llm/tools/site_tool.py` (`publish_site`) |
+| Publish and lookup tools | `src/backend/mcp_servers/site_publish_mcp/` (`publish_site` / `list_sites`, shipped by the Sites plugin) |
+| Internal endpoints | `src/backend/api/routes/v1/internal_sites.py` (`/v1/internal/sites/publish`, `/v1/internal/sites/list`) |
+| Site lookup service | `src/backend/core/services/site_listing.py` (one record shape for local and cloud) |
 | Business service | `src/backend/core/services/site_service.py` |
 | Public hosting route | `src/backend/api/routes/sites_serve.py` (`GET /site/{slug}/{path}`) |
 | Management API | `src/backend/api/routes/v1/sites.py` (`/v1/sites`) |
+| Access password | `src/backend/core/services/site_password.py` (hash + credential), `src/backend/api/routes/site_gate.py` (unified password page) |
 | Database table | `sites` (`core/db/models/site.py`) |
-| Frontend management panel | `src/frontend/src/components/sites/SitesPanel.tsx` (Lab → Sites) |
+| Frontend management panel | `src/frontend/src/components/sites/SitesPanel.tsx` (Lab → Sites), `SitePasswordField.tsx` (password management) |
 | nginx forwarding | `location /site/` in `src/frontend/default.conf.template` |
 
 Environment switch: `SITES_ENABLED=false` disables the publish tool entirely (enabled by default).

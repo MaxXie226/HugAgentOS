@@ -31,6 +31,7 @@ from core.services.site_access_policy import (
     site_scope_write_fields,
     site_scope_ref,
 )
+from core.services.site_password import hash_access_password, verify_access_token
 from core.storage import get_storage
 from sqlalchemy.orm import Session
 
@@ -51,6 +52,12 @@ MAX_KV_VALUE_BYTES = 4 * 1024
 MAX_SUBMISSIONS_PER_SITE = 5000
 MAX_SUBMISSION_BYTES = 8 * 1024
 KV_KEY_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
+# 「谁能读写站点 KV」的唯一声明处。站内 JS 那条 __api/kv 按设计不校验身份；带身份
+# 的两条（站点管理台、智能体工具）都读这两个常量，不各自决定级别——否则同一个操作
+# 在不同入口会给出不同答案。写用 edit 与发布新版本对齐：能换掉整站内容的人，改一个
+# KV 值不该反而被拦住。
+KV_READ_LEVEL = "view"
+KV_WRITE_LEVEL = "edit"
 FORM_KEY_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 # Reserved in-site path prefix: /site/<slug>/__api/** is the dynamic API; publishing files under the same name is not allowed
 RESERVED_PATH_PREFIX = "__api"
@@ -536,6 +543,30 @@ class SiteService:
             },
         )
 
+    # ── Access password (an extra gate on top of the public link) ──
+
+    def set_access_password(self, site_id: str, user_id: str, password: str) -> Site:
+        # 校验与 Argon2 计算（约 50ms）都放在取行锁之前，别让它们撑长锁持有时间。
+        password_hash = hash_access_password(password)
+        site = self.get_owned(site_id, user_id, for_update=True)
+        return self.repo.update(site.site_id, {"access_password_hash": password_hash})
+
+    def clear_access_password(self, site_id: str, user_id: str) -> Site:
+        site = self.get_owned(site_id, user_id, for_update=True)
+        return self.repo.update(site.site_id, {"access_password_hash": None})
+
+    def authorize_access(
+        self, site: Site, viewer_user_id: Optional[str], access_token: Optional[str]
+    ) -> bool:
+        """站点设了访问密码时，访客需持有效凭据；能管理该站点的人无需解锁。"""
+        if not site.access_password_hash:
+            return True
+        if verify_access_token(site, access_token):
+            return True
+        return bool(
+            viewer_user_id and site_management_permission(self.db, site, viewer_user_id) != "none"
+        )
+
     # ── View authorization (shared by the hosting route & site API) ─
 
     def authorize_view(self, site: Site, viewer_user_id: Optional[str]) -> bool:
@@ -548,6 +579,10 @@ class SiteService:
     def _check_kv_key(key: str) -> None:
         if not KV_KEY_RE.match(key or ""):
             raise BadRequestError("KV key 仅支持 1-64 位字母/数字/_.:-")
+
+    def kv_list(self, site: Site, *, limit: int = 500) -> tuple[list, int]:
+        """按 key 升序返回最多 limit 条，外加真实总数（total > len(rows) 即还有更多）。"""
+        return self.repo.kv_list(site.site_id, limit=limit), self.repo.kv_count(site.site_id)
 
     def kv_get(self, site: Site, key: str) -> Optional[str]:
         self._check_kv_key(key)

@@ -1,6 +1,6 @@
 import { listenForFolderProjects } from './desktop/folderMenu';
 import { CapabilitySyncGate } from './components/desktop/CapabilitySyncGate';
-import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import {
   Layout, Button, Typography, Tag, Modal,
@@ -333,9 +333,6 @@ export default function App() {
   const userScrolledUpRef = useRef(false);
   // 上一次观察到的 scrollTop：用来判断这次滚动是"往上"还是"内容长高把视口顶下去"。
   const lastScrollTopRef = useRef(0);
-  // The smooth animation fires a scroll event on every frame; the listener must be muted
-  // during it, otherwise mid-animation states get misread as "user scrolled up".
-  const isAutoScrollingRef = useRef(false);
   // 鼠标在消息区按下到抬起之间：用户正在拖选（此刻选区可能还是空的），先停跟随。
   const isSelectingRef = useRef(false);
 
@@ -536,9 +533,6 @@ export default function App() {
         { scrollTop: content.scrollTop, distanceFromBottom: distanceFromBottom(content) },
       );
       lastScrollTopRef.current = next.lastScrollTop;
-      // 自动滚动期间只更新基线，不改跟随开关：平滑动画每帧都发 scroll 事件，
-      // 中途状态会被误读成"用户在滚"。
-      if (isAutoScrollingRef.current) return;
       userScrolledUpRef.current = next.userScrolledUp;
     };
     // 顶到头时不产生 scroll 事件，只有 wheel —— 所以滚轮向上直接置位。
@@ -569,31 +563,21 @@ export default function App() {
     };
   }, [contentEl]);
 
-  // Chat switch: reset follow state and smooth-scroll to the bottom (keeping the
-  // "pulled down from the top" visual). Height growth from follow-up/action-bar animations
-  // after reaching the bottom is covered by the ResizeObserver below.
+  // Chat switch: reset follow state and land at the bottom in the same commit, before the
+  // browser paints — opening a conversation shows its latest message directly, with no
+  // scroll animation. Height growth from follow-up/action-bar animations after reaching the
+  // bottom is covered by the ResizeObserver below.
   // hasMessages as a dependency: entering a chat whose messages haven't been fetched yet,
-  // the first render has scrollHeight===clientHeight so the smooth scroll is a no-op;
-  // once messages load asynchronously this effect runs again, ensuring we truly land at the bottom.
-  useEffect(() => {
+  // the first render has scrollHeight===clientHeight so the jump is a no-op; once messages
+  // load asynchronously this effect runs again, ensuring we truly land at the bottom.
+  useLayoutEffect(() => {
     userScrolledUpRef.current = false;
     const content = contentEl;
     if (!content) return;
-    // 换会话后列表整个换了一棵树，旧的 scrollTop 基线没有意义：不清零的话
-    // 新会话第一帧（scrollTop=0）会被当成"用户往上滚"，一进来就脱离跟随。
+    scrollElementToBottom(content);
+    // 换会话后列表整个换了一棵树，旧的 scrollTop 基线没有意义：不同步的话
+    // 下一次 scroll 事件会拿旧基线比出"用户往上滚"，一进来就脱离跟随。
     lastScrollTopRef.current = content.scrollTop;
-    isAutoScrollingRef.current = true;
-    const raf = requestAnimationFrame(() => scrollElementToBottom(content, true));
-    const release = () => { isAutoScrollingRef.current = false; };
-    // scrollend is a modern-browser event (Chrome 114+/Firefox 109+/Safari 17+);
-    // for older browsers a single setTimeout serves as the safety net.
-    content.addEventListener('scrollend', release, { once: true });
-    const fallback = window.setTimeout(release, 1000);
-    return () => {
-      cancelAnimationFrame(raf);
-      content.removeEventListener('scrollend', release);
-      window.clearTimeout(fallback);
-    };
   }, [currentChatId, hasMessages, contentEl]);
 
   // Observe chat-list size changes: when streaming chunks or the framer-motion animations
@@ -609,7 +593,7 @@ export default function App() {
     const list = chatListRef.current;
     if (!content || !list || typeof ResizeObserver === 'undefined') return;
     const ro = new ResizeObserver(() => {
-      if (userScrolledUpRef.current || isAutoScrollingRef.current) return;
+      if (userScrolledUpRef.current) return;
       // 正在拖选或已经选中了正文：跟随必须让位，否则选区在手底下被拽走、复制不了。
       if (isSelectingRef.current || hasActiveSelectionIn(list, window.getSelection())) return;
       content.scrollTop = content.scrollHeight;

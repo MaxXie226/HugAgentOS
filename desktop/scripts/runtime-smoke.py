@@ -11,7 +11,10 @@ import platform
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
+
+NATIVE_PROCESS_FLAGS = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
 
 REQUIRED_MODULES = (
     "agentscope",
@@ -28,43 +31,111 @@ REQUIRED_MODULES = (
 )
 
 
+def check_bash_runtime(root: Path, tools: dict) -> dict:
+    """Run real file tools using only the shipped Windows shell and DLLs."""
+    tool = tools.get("git-bash")
+    if not isinstance(tool, dict) or tool.get("path") != "native/git-bash/usr/bin/bash.exe":
+        raise RuntimeError("Bundled Bash is missing from native-tools.json")
+    binary = (root / tool["path"]).resolve()
+    binary.relative_to(root.resolve())
+    if not binary.is_file():
+        raise RuntimeError("Bundled Bash executable is missing")
+    from runtime_tools import windows_tool_path_entries
+    env = {key: value for key, value in os.environ.items()
+           if key in ("SYSTEMROOT", "WINDIR", "TMP", "TEMP", "TMPDIR")}
+    # Use the runner's real GNU-before-System32 order, never inherited host Git.
+    env["PATH"] = os.pathsep.join(windows_tool_path_entries(str(binary)))
+    script = r"""
+for tool in bash sh find sort head cut grep sed awk cat mkdir rm cp mv ls wc xargs tr; do
+    command -v "$tool" >/dev/null
+done
+mkdir -p '中文 文件'
+printf 'needle\nother\n' > '中文 文件/input.txt'
+cp '中文 文件/input.txt' '中文 文件/copy.txt'
+mv '中文 文件/copy.txt' '中文 文件/moved.txt'
+test "$(find . -type f -name '*.txt' -printf '%T@ %p\n' | sort -rn | head -1 | cut -d' ' -f2-)" != ''
+test "$(grep -rE --include='*.txt' -l needle . | wc -l | tr -d ' ')" = 2
+test "$(cat '中文 文件/input.txt' | sed -n '1p' | awk '{print $1}')" = needle
+test "$(printf 'ok' | xargs printf '%s')" = ok
+ls '中文 文件' >/dev/null
+rm '中文 文件/moved.txt'
+test ! -e '中文 文件/moved.txt'
+printf 'HUGAGENT_PRIVATE_BASH_OK\n'
+"""
+    with tempfile.TemporaryDirectory(prefix="bash smoke 中文 ") as folder:
+        env["HOME"] = folder
+        result = subprocess.run(
+            [str(binary), "--noprofile", "--norc", "-e", "-u", "-o", "pipefail", "-c", script],
+            cwd=folder, env=env, capture_output=True, text=True, encoding="utf-8",
+            timeout=60, **NATIVE_PROCESS_FLAGS)
+        if result.returncode != 0:
+            raise RuntimeError("Bundled Bash file-tool smoke test failed: " + result.stderr[-2000:])
+        if result.stdout.strip() != "HUGAGENT_PRIVATE_BASH_OK":
+            raise RuntimeError("Bundled Bash file-tool smoke test failed")
+    return {"git-bash": tool["version"]}
+
+
 def check_native_tools() -> dict:
     root = Path(__file__).resolve().parent
     tools = json.loads((root / "native-tools.json").read_text(encoding="utf-8"))
-    tool = tools["officecli"]
-    binary = root / tool["path"]
-    binary.resolve().relative_to(root)
-    if not binary.is_file():
-        raise RuntimeError("Bundled OfficeCLI is missing")
-    # Do not inherit developer tool directories or cloud credentials. The CLI
-    # must run from the relocated private runtime on the end user's machine.
-    env = {
-        key: value
-        for key, value in os.environ.items()
-        if key in ("SYSTEMROOT", "WINDIR", "TMP", "TEMP", "TMPDIR", "HOME", "USERPROFILE", "LANG")
-    }
-    env["PATH"] = str(binary.parent) + os.pathsep + os.defpath
+    bash_versions = check_bash_runtime(root, tools) if os.name == "nt" else {}
+    binaries = {}
+    env = {key: value for key, value in os.environ.items()
+           if key in ("SYSTEMROOT", "WINDIR", "TMP", "TEMP", "TMPDIR", "HOME", "USERPROFILE", "LANG")}
     env["DOTNET_EnableDiagnostics"] = "0"
-    env["OFFICECLI_SKIP_UPDATE"] = "1"  # the desktop release owns this binary
-    result = subprocess.run(
-        [str(binary), "--version"],
-        env=env,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        timeout=30,
-        check=True,
-    )
-    if not re.search(r"(?<![0-9.])" + re.escape(tool["version"]) + r"(?![0-9.])", result.stdout):
-        raise RuntimeError("Bundled OfficeCLI version does not match the manifest")
-    return {"officecli": tool["version"]}
+    env["OFFICECLI_SKIP_UPDATE"] = "1"
+    if sys.platform.startswith("linux"):
+        env["SAL_USE_VCLPLUGIN"] = "svp"
+    for name in ("officecli", "pandoc", "libreoffice"):
+        if name not in tools:
+            raise RuntimeError(f"Bundled {name} is missing from native-tools.json")
+        tool = tools[name]
+        binary = root / tool["path"]
+        binary.resolve().relative_to(root)
+        if not binary.is_file():
+            raise RuntimeError(f"Bundled {name} is missing")
+        binaries[name] = binary
+        env["PATH"] = str(binary.parent) + os.pathsep + os.defpath
+        result = subprocess.run([str(binary), "--version"], env=env, capture_output=True,
+                                text=True, encoding="utf-8", timeout=60, check=True, **NATIVE_PROCESS_FLAGS)
+        ending = r"(?![0-9])" if name == "libreoffice" else r"(?![0-9.])"
+        if not re.search(r"(?<![0-9.])" + re.escape(tool["version"]) + ending,
+                         result.stdout + result.stderr):
+            raise RuntimeError(f"Bundled {name} version does not match the manifest")
+    # Exercise conversion after relocation, not merely --version or host PATH.
+    with tempfile.TemporaryDirectory(prefix="office-smoke-") as folder:
+        work = Path(folder)
+        markdown = work / "source.md"
+        markdown.write_text("# Desktop offline test\n\nBundledOfficeRoundtrip\n", encoding="utf-8")
+        docx = work / "source.docx"
+        subprocess.run([str(binaries["pandoc"]), str(markdown), "-o", str(docx)],
+                       env=env, capture_output=True, timeout=60, check=True, **NATIVE_PROCESS_FLAGS)
+        parsed = subprocess.run([str(binaries["pandoc"]), str(docx), "-t", "plain"],
+                                env=env, capture_output=True, text=True, timeout=60, check=True, **NATIVE_PROCESS_FLAGS)
+        if "BundledOfficeRoundtrip" not in parsed.stdout:
+            raise RuntimeError("Bundled Pandoc DOCX roundtrip failed")
+        subprocess.run([str(binaries["libreoffice"]),
+                        "-env:UserInstallation=" + (work / "profile").as_uri(),
+                        "--headless", "--convert-to", "pdf", "--outdir", str(work), str(docx)],
+                       env=env, capture_output=True, timeout=120, check=True, **NATIVE_PROCESS_FLAGS)
+        pdf = work / "source.pdf"
+        if not pdf.is_file() or not pdf.read_bytes().startswith(b"%PDF-"):
+            raise RuntimeError("Bundled LibreOffice DOCX-to-PDF conversion failed")
+    return {**bash_versions, **{name: tools[name]["version"] for name in binaries}}
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--source", type=Path)
     parser.add_argument("--native-only", action="store_true")
+    parser.add_argument("--bash-only", action="store_true")
     args = parser.parse_args()
+
+    if args.bash_only:
+        root = Path(__file__).resolve().parent
+        tools = json.loads((root / "native-tools.json").read_text(encoding="utf-8"))
+        print(json.dumps({"ok": True, "native_tools": check_bash_runtime(root, tools)}))
+        return 0
 
     native_tools = check_native_tools()
     if args.native_only:

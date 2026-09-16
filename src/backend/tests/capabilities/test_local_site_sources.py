@@ -207,7 +207,7 @@ def test_project_query_from_new_chat_and_explicit_publish(local_project, monkeyp
     from core.services.desktop_site_publish import package_local_site
     from core.services.site_packaging import safe_extract_tar
     from core.db.models import ChatSession
-    from core.llm.tools.site_tools import register_project_site_tools
+    from core.services.site_listing import list_sites
 
     monkeypatch.setattr(sources, "current_cloud", lambda: ("https://cloud.example", "cloud-user"))
     page = root / "sites" / "resume"
@@ -224,22 +224,11 @@ def test_project_query_from_new_chat_and_explicit_publish(local_project, monkeyp
         db.add(ChatSession(chat_id="new-chat", user_id="owner", project_id="project"))
         db.commit()
 
-    from core.llm.tool_collector import ToolCollector
-    from agentscope.tool import Toolkit
-
-    collector = ToolCollector()
-    register_project_site_tools(collector, project_id="project", user_id="owner")
-    schemas = asyncio.run(Toolkit(tools=collector.function_tools).get_tool_schemas())
-    query_schema = next(
-        s["function"] for s in schemas if s["function"]["name"] == "list_project_sites"
-    )
-    assert not query_schema["parameters"].get("properties")
-    query = collector.get_tool("list_project_sites")._func
-    result = json.loads(asyncio.run(query()).content[0].text)
-    entry = result["items"][0]
+    entry = list_sites("owner", "new-chat")[0]
     assert entry["site_id"] == "original-site"
     assert entry["publish_dir"] == str(page)
     assert entry["url"] == "https://cloud.example/site/resume/"
+    assert entry["in_current_project"] is True
     assert "original-site" in sources.editing_prompt("owner", "new-chat")
     (page / "index.html").write_text("<h1>Zhang San resume</h1>")
 
@@ -270,7 +259,8 @@ def test_project_query_from_new_chat_and_explicit_publish(local_project, monkeyp
 
 def test_project_query_reports_account_switch_as_error(local_project, monkeypatch):
     from core.services import local_site_sources as sources
-    from core.llm.tools.site_tools import register_project_site_tools
+    from core.services.site_listing import list_sites
+    from fastapi import HTTPException
 
     states = iter(
         [
@@ -282,16 +272,9 @@ def test_project_query_reports_account_switch_as_error(local_project, monkeypatc
     )
     monkeypatch.setattr(sources, "current_cloud", lambda: next(states))
 
-    class Toolkit:
-        def register_tool_function(self, fn, **kwargs):
-            self.fn = fn
-
-    toolkit = Toolkit()
-    register_project_site_tools(toolkit, project_id="project", user_id="owner")
-    result = json.loads(asyncio.run(toolkit.fn()).content[0].text)
-    assert result["ok"] is False
-    assert result["status"] == 409
-    assert "items" not in result
+    with pytest.raises(HTTPException) as excinfo:
+        list_sites("owner", "chat")
+    assert excinfo.value.status_code == 409
 
 
 def test_project_query_lists_candidates_without_mutating_chat(local_project, monkeypatch):

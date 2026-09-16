@@ -34,13 +34,13 @@ def test_installed_sites_upgrade_preserves_settings_and_exports_new_skill(
         db.commit()
         ids = dict(row.component_ids)
         assert upgrade_builtin_sites(db) == 1
-        assert row.version == "1.2.0"
+        assert row.version == "1.4.0"
         assert row.component_ids == ids
         assert skill.is_enabled is False
         assert mcp.is_enabled is False
         assert mcp.url == "http://configured.example/mcp"
         assert mcp.headers == {"X-Test-Config": "preserved"}
-        assert "list_project_sites" in skill.skill_content
+        assert "list_sites" in skill.skill_content
         assert "编辑必须显式传原 site_id" in skill.skill_content
         assert "均无需 site_id" not in str(mcp.tools_json)
         assert skill_content_hash(skill.skill_content, skill.extra_files or {}) != old_hash
@@ -49,7 +49,7 @@ def test_installed_sites_upgrade_preserves_settings_and_exports_new_skill(
             text = archive.read(
                 next(n for n in archive.namelist() if n.endswith("SKILL.md"))
             ).decode()
-            assert "list_project_sites" in text
+            assert "list_sites" in text
         assert upgrade_builtin_sites(db) == 0
         plugin_service.uninstall_plugin(db, row.install_id, owner_user_id=owner)
         assert upgrade_builtin_sites(db) == 0
@@ -94,7 +94,7 @@ def test_site_upgrade_is_an_all_role_startup_step(local_project, monkeypatch):
     assert gate is True and roles == frozenset({app.SERVICE, app.EXECUTION_PLANE})
     asyncio.run(app._startup_upgrade_sites_plugin())
     with factory() as db:
-        assert db.query(InstalledPlugin).one().version == "1.2.0"
+        assert db.query(InstalledPlugin).one().version == "1.4.0"
 
 
 def test_site_upgrade_refreshes_only_matching_local_projection(local_project, monkeypatch):
@@ -123,7 +123,7 @@ def test_site_upgrade_refreshes_only_matching_local_projection(local_project, mo
         edges = registry.components_of(before.install_id)
         assert upgrade_builtin_sites(db) == 1
         after = registry.get(before.install_id)
-        assert after.version == "1.2.0"
+        assert after.version == "1.4.0"
         assert after.enabled is False
         assert registry.components_of(after.install_id) == edges
         assert after.payload["db_install_id"] == row.install_id
@@ -131,7 +131,7 @@ def test_site_upgrade_refreshes_only_matching_local_projection(local_project, mo
         manifest = plugins.load_manifest(
             store.get("plugin", "local", "sites", after.resolved_revision)
         )
-        assert manifest["version"] == "1.2.0"
+        assert manifest["version"] == "1.4.0"
         # A same-slug private row must not overwrite the global projection.
         monkeypatch.setattr(plugin_service, "_project_plugin_to_store", lambda *a, **k: None)
         plugin_service.install_plugin(db, "sites", owner_user_id="owner")

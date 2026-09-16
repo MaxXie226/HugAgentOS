@@ -2078,13 +2078,6 @@ async def create_agent_executor(
             ),
         )
 
-    if not disable_tools and (project_ctx or {}).get("project_is_local"):
-        from core.llm.tools.site_tools import register_project_site_tools
-
-        register_project_site_tools(
-            toolkit, project_id=project_ctx["project_id"], user_id=current_user_id,
-        )
-
     # ── 跨会话历史（list_related_chats / read_chat） ──
     # 只读、按 user_id 锁死作用域，注册在收窄/标准两条路之前：用户可以在任何模式下把
     # 一段旧会话引用进来，注入的名片明确要求「细节去 read_chat 取」，模式收窄了工具却
@@ -3024,6 +3017,7 @@ async def create_agent_executor(
                         api_key=_mode_cfg.api_key,
                         provider=_mode_cfg.provider,
                         provider_extra=_mode_cfg.provider_extra,
+                        api_protocol=(_mode_cfg.extra or {}).get("api_protocol"),
                         stream=True,
                     ),
                     _mode_cfg,
@@ -3091,11 +3085,15 @@ async def create_agent_executor(
                     _final_provider_extra = split_provider_extra(
                         get_spec(_final_provider), provider.extra_config or {}
                     )
+                    _final_api_protocol = (provider.extra_config or {}).get("api_protocol")
                 else:
                     _final_provider = (
                         _fallback_cfg.provider if _fallback_cfg else "openai_compatible"
                     )
                     _final_provider_extra = _fallback_cfg.provider_extra if _fallback_cfg else {}
+                    _final_api_protocol = (
+                        (_fallback_cfg.extra or {}).get("api_protocol") if _fallback_cfg else None
+                    )
                 _final_temp = (
                     _user_temp
                     if _user_temp is not None
@@ -3116,6 +3114,7 @@ async def create_agent_executor(
                         api_key=_final_api_key,
                         provider=_final_provider,
                         provider_extra=_final_provider_extra,
+                        api_protocol=_final_api_protocol,
                         stream=True,
                     )
                     # Only an explicitly selected model provider pins; changing

@@ -188,6 +188,12 @@ export function chatTargetHeaders(chatId?: string | null): Record<string, string
   return _hybridDual && isLocalChat(chatId) ? localHeader() : {};
 }
 
+/** Capture the upload destination before awaiting any file I/O. Project ownership wins. */
+export function chatUploadTarget(chatId?: string, projectId?: string): 'local' | 'cloud' | undefined {
+  if (!_hybridDual) return undefined;
+  return (projectId ? isLocalProject(projectId) : isLocalChat(chatId)) ? 'local' : 'cloud';
+}
+
 /** 从 API URL 推断混合路由头（authFetch 自动兜底：预览/下载等散点直连调用）。 */
 function inferTargetHeadersFromUrl(url: string): Record<string, string> {
   if (!_hybridDual) return {};
@@ -2636,6 +2642,7 @@ export function pluginWebAssetUrl(slug: string, entry: string): string {
 // ── File upload API ─────────────────────────────────────────────
 
 export interface UploadedFile {
+  origin?: 'local' | 'cloud';
   file_id: string;
   name: string;
   size: number;
@@ -2647,8 +2654,10 @@ export async function uploadFile(
   file: File,
   chatId?: string,
   folderId?: string | null,
+  options: { apiUrl?: string; target?: 'local' | 'cloud'; projectId?: string } = {},
 ): Promise<UploadedFile> {
-  const url = `${getApiUrl()}/v1/file/upload`;
+  const origin = options.target ?? chatUploadTarget(chatId, options.projectId);
+  const url = `${options.apiUrl ?? getApiUrl()}/v1/file/upload`;
   const formData = new FormData();
   formData.append('file', file);
   if (chatId) formData.append('chat_id', chatId);
@@ -2657,17 +2666,18 @@ export async function uploadFile(
   const response = await fetch(url, {
     method: 'POST',
     credentials: 'include',
+    headers: origin ? { [LOCAL_TARGET_HEADER]: origin } : {},
     body: formData,
   });
 
   if (!response.ok) {
     const payload = await response.json().catch(() => ({}));
-    throwIfSessionExpired(response.status, payload);
+    if (origin !== 'local') throwIfSessionExpired(response.status, payload);
     throw new Error(readErrorMessage(payload, `Upload failed: ${response.status}`));
   }
 
   const payload = await response.json();
-  return unwrapData<UploadedFile>(payload);
+  return { ...unwrapData<UploadedFile>(payload), ...(origin ? { origin } : {}) };
 }
 
 /** Overwrite existing file content in-place (same file_id & URL). */
@@ -4158,6 +4168,8 @@ export interface SiteItem extends SiteEditionFields {
   chat_id: string | null;
   /** Site source project id; when set → the "Edit" action on the card can continue editing; null for legacy sites */
   project_id: string | null;
+  /** 站点已设访问密码（密码本身不会下发）。 */
+  has_password: boolean;
   /** Current actor can edit this source project. */
   editable: boolean;
   permission?: 'none' | 'view' | 'edit' | 'admin';
@@ -4182,6 +4194,7 @@ function toSiteItem(raw: JsonObject): SiteItem {
     total_size_bytes: Number(raw.total_size_bytes ?? 0),
     chat_id: typeof raw.chat_id === 'string' ? raw.chat_id : null,
     project_id: typeof raw.project_id === 'string' ? raw.project_id : null,
+    has_password: raw.has_password === true,
     editable: Boolean(raw.editable),
     permission: raw.permission as SiteItem['permission'],
     can_manage: raw.can_manage === true,
@@ -4219,6 +4232,30 @@ export async function updateSite(
   const wrapped = await apiRequest<unknown>(`/v1/sites/${encodeURIComponent(siteId)}`, {
     method: 'PATCH',
     body: JSON.stringify(data),
+  }, siteTarget(origin));
+  return { ...toSiteItem(unwrapData<JsonObject>(wrapped)), origin };
+}
+
+/** 设置 / 修改站点访问密码（仅站点管理者）。 */
+export async function setSitePassword(
+  siteId: string,
+  password: string,
+  origin?: 'cloud' | 'local',
+): Promise<SiteItem> {
+  const wrapped = await apiRequest<unknown>(`/v1/sites/${encodeURIComponent(siteId)}/password`, {
+    method: 'PUT',
+    body: JSON.stringify({ password }),
+  }, siteTarget(origin));
+  return { ...toSiteItem(unwrapData<JsonObject>(wrapped)), origin };
+}
+
+/** 清除站点访问密码，站点回到"凭链接直接访问"。 */
+export async function clearSitePassword(
+  siteId: string,
+  origin?: 'cloud' | 'local',
+): Promise<SiteItem> {
+  const wrapped = await apiRequest<unknown>(`/v1/sites/${encodeURIComponent(siteId)}/password`, {
+    method: 'DELETE',
   }, siteTarget(origin));
   return { ...toSiteItem(unwrapData<JsonObject>(wrapped)), origin };
 }

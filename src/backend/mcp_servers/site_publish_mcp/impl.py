@@ -22,6 +22,40 @@ def _internal_token() -> str:
     return os.environ.get("BACKEND_INTERNAL_TOKEN", "")
 
 
+async def _call_backend(path: str, payload: Dict[str, Any], *, timeout: float) -> Dict[str, Any]:
+    headers = {"Content-Type": "application/json"}
+    token = _internal_token()
+    if token:
+        headers["X-Internal-Token"] = token
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(f"{_backend_url()}{path}", json=payload, headers=headers)
+    except httpx.HTTPError as exc:
+        return {"error": f"请求失败（无法连到后端）: {exc}"}
+
+    if response.status_code != 200:
+        return {"error": f"接口返回 {response.status_code}: {response.text[:300]}"}
+    try:
+        envelope = response.json()
+    except Exception as exc:
+        return {"error": f"接口返回非 JSON: {exc}"}
+    data = envelope.get("data") if isinstance(envelope, dict) else None
+    if isinstance(data, dict):
+        return data
+    return envelope if isinstance(envelope, dict) else {"error": "接口返回格式异常"}
+
+
+async def list_sites(*, user_id: str, chat_id: str, limit: int = 10) -> Dict[str, Any]:
+    if not user_id:
+        return {"error": "当前会话缺少用户身份，无法查询站点"}
+    return await _call_backend(
+        "/v1/internal/sites/list",
+        {"user_id": user_id, "chat_id": chat_id, "limit": limit},
+        timeout=30.0,
+    )
+
+
 async def publish_site(
     *,
     user_id: str,
@@ -48,28 +82,34 @@ async def publish_site(
         "user_id": user_id,
         "chat_id": chat_id,
     }
-    headers = {"Content-Type": "application/json"}
-    token = _internal_token()
-    if token:
-        headers["X-Internal-Token"] = token
+    return await _call_backend("/v1/internal/sites/publish", payload, timeout=120.0)
 
-    try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            response = await client.post(
-                f"{_backend_url()}/v1/internal/sites/publish",
-                json=payload,
-                headers=headers,
-            )
-    except httpx.HTTPError as exc:
-        return {"error": f"发布请求失败（无法连到后端）: {exc}"}
 
-    if response.status_code != 200:
-        return {"error": f"发布接口返回 {response.status_code}: {response.text[:300]}"}
-    try:
-        envelope = response.json()
-    except Exception as exc:
-        return {"error": f"发布接口返回非 JSON: {exc}"}
-    data = envelope.get("data") if isinstance(envelope, dict) else None
-    if isinstance(data, dict):
-        return data
-    return envelope if isinstance(envelope, dict) else {"error": "发布接口返回格式异常"}
+async def site_kv(
+    *,
+    action: str,
+    user_id: str,
+    site_id: str = "",
+    slug: str = "",
+    key: str = "",
+    value: str = "",
+    limit: int = 50,
+) -> Dict[str, Any]:
+    """Forward a site KV read/write to the backend's ``/v1/internal/sites/kv``.
+
+    KV lives in the database and the mcp container has no connection to it, and
+    the ownership check needs backend context — so, like publishing, this only
+    forwards. KV never touches the sandbox, hence no chat id.
+    """
+    if not user_id:
+        return {"error": "当前会话缺少用户身份，无法访问站点 KV"}
+    payload = {
+        "action": action,
+        "site_id": site_id,
+        "slug": slug,
+        "key": key,
+        "value": value,
+        "limit": limit,
+        "user_id": user_id,
+    }
+    return await _call_backend("/v1/internal/sites/kv", payload, timeout=30.0)

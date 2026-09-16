@@ -24,8 +24,8 @@ notifications, local-folder projects, dual-upstream routing, identity/model brid
 offline local-service install/upgrade/rollback, and SHA-256 verified updates.
 
 The UOS window follows the compact macOS client layout: it keeps the native title bar
-and window controls but does not render the File/Edit/View/Help application menu, and
-Alt cannot reveal that menu temporarily.
+and window controls. Its File menu offers New Window (Ctrl+Shift+N), New Chat,
+and Quit; quick ask keeps its compact appearance without a menu bar.
 
 A distribution brand may preset the first-launch mode for a full package. A fixed
 dual-mode build goes directly to one-action initialization. The initialization and

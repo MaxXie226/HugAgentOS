@@ -1,0 +1,12 @@
+Bundled office conversion tools
+
+Pandoc 3.11: Copyright John MacFarlane and contributors. GPL version 2 or later.
+License: Pandoc-COPYING.md. Corresponding source: https://github.com/jgm/pandoc/tree/3.11
+
+LibreOffice 26.2.6: Copyright The Document Foundation and contributors.
+MPL 2.0 and component-specific licenses. The full unmodified distribution resources,
+including its LICENSE, NOTICE and third-party license files, accompany the executable.
+Corresponding source: https://download.documentfoundation.org/libreoffice/src/26.2.6/
+
+These components remain separate executables. Native executable signing may be
+applied during packaging; their source code is not modified.

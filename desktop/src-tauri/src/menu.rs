@@ -5,7 +5,7 @@
 //! 编辑、全屏等用系统预定义项（`PredefinedMenuItem`），撤销/复制/粘贴等由系统直接作用于
 //! 焦点输入框，无需自己接线。
 
-use tauri::menu::{AboutMetadataBuilder, Menu, MenuEvent, SubmenuBuilder};
+use tauri::menu::{AboutMetadataBuilder, Menu, MenuEvent, MenuItem, SubmenuBuilder};
 use tauri::{AppHandle, Manager, Runtime};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
@@ -41,7 +41,9 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
             .quit()
             .build()?;
 
-        let mut file = SubmenuBuilder::new(app, "文件").text("new_chat", "新建对话");
+        let mut file = SubmenuBuilder::new(app, "文件")
+            .item(&MenuItem::with_id(app, "new_window", "新建窗口", true, Some("CmdOrCtrl+Shift+N"))?)
+            .text("new_chat", "新建对话");
         // 仅交付混合模式的包没有别的形态可切，不摆一个点了也没意义的入口。
         if !hybrid {
             file = file.text("run_mode", "运行模式…");
@@ -84,7 +86,9 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
 
     #[cfg(not(target_os = "macos"))]
     {
-        let mut file = SubmenuBuilder::new(app, "文件").text("new_chat", "新建对话");
+        let mut file = SubmenuBuilder::new(app, "文件")
+            .item(&MenuItem::with_id(app, "new_window", "新建窗口", true, Some("CmdOrCtrl+Shift+N"))?)
+            .text("new_chat", "新建对话");
         // 仅交付混合模式的包没有别的形态可切，不摆一个点了也没意义的入口。
         if !hybrid {
             file = file.text("run_mode", "运行模式…");
@@ -138,10 +142,15 @@ pub fn handle(app: &AppHandle, event: MenuEvent) {
 
 /// 按菜单项 id 执行动作。抽出来让托盘菜单也能直接调。
 pub fn dispatch(app: &AppHandle, id: &str) {
+    dispatch_for_window(app, id, &crate::active_desktop_label(app));
+}
+
+pub fn dispatch_for_window(app: &AppHandle, id: &str, label: &str) {
     match id {
+        "new_window" => crate::new_desktop_window(app),
         // 新建对话：主窗口整页导航回首页（= 全新对话就绪态）。
         "new_chat" => {
-            if let Some(w) = app.get_webview_window("main") {
+            if let Some(w) = app.get_webview_window(label) {
                 let port = app.state::<Shared>().port;
                 let _ = w.eval(format!(
                     "window.location.replace('http://127.0.0.1:{}/')",
@@ -159,9 +168,10 @@ pub fn dispatch(app: &AppHandle, id: &str) {
                 return;
             }
             let app = app.clone();
+            let label = label.to_string();
             app.clone().dialog().file().pick_folder(move |picked| {
                 let Some(path) = picked.and_then(|p| p.into_path().ok()) else { return };
-                if let Some(window) = app.get_webview_window("main") {
+                if let Some(window) = app.get_webview_window(&label) {
                     let detail = serde_json::to_string(&path.to_string_lossy()).unwrap();
                     let _ = window.eval(format!(
                         "if(window.dispatchEvent(new CustomEvent('hugagent:open-project-folder',{{detail:{detail},cancelable:true}}))){{sessionStorage.setItem('hugagent:pending-project-folder',{detail});window.location.replace('/');}}"
@@ -169,10 +179,10 @@ pub fn dispatch(app: &AppHandle, id: &str) {
                 }
             });
         }
-        "server_config" => crate::open_server_config(app),
+        "server_config" => crate::open_server_config_in(app, label),
         // 运行模式选择页（本机 / 云端 / 双模式）——初始化选型的再次入口。
         "run_mode" => {
-            if let Some(w) = app.get_webview_window("main") {
+            if let Some(w) = app.get_webview_window(label) {
                 let port = app.state::<Shared>().port;
                 let _ = w.eval(format!(
                     "window.location.replace('http://127.0.0.1:{}/__desktop/init?manage=1')",
@@ -184,7 +194,7 @@ pub fn dispatch(app: &AppHandle, id: &str) {
             }
         }
         "local_server" => {
-            if let Some(w) = app.get_webview_window("main") {
+            if let Some(w) = app.get_webview_window(label) {
                 let port = app.state::<Shared>().port;
                 let _ = w.eval(format!(
                     "window.location.replace('http://127.0.0.1:{}/__desktop/setup?manage=1')",
@@ -196,7 +206,7 @@ pub fn dispatch(app: &AppHandle, id: &str) {
             }
         }
         "reload" => {
-            if let Some(w) = app.get_webview_window("main") {
+            if let Some(w) = app.get_webview_window(label) {
                 let _ = w.eval("window.location.reload()");
             }
         }

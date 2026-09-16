@@ -105,6 +105,7 @@ pub async fn serve(state: ProxyState, web_dir: PathBuf) -> std::io::Result<u16> 
     let app = Router::new()
         .route("/__desktop/login", get(login_page))
         .route("/__desktop/close-confirm", get(close_confirm_page))
+        .route("/__desktop/update-progress", get(crate::update::progress_page))
         .route("/__desktop/server-config", get(server_config_page))
         .route("/__desktop/init", get(init_page))
         .route("/__desktop/setup", get(setup_page))
@@ -577,6 +578,7 @@ const TB_CSS: &str = r##"
 
 const TB_MENU: &str = r##"<nav class="tb-menu" aria-label="应用菜单" data-i18n-aria="app_menu">
 <div class="tb-menuGroup" data-menu="file"><button class="tb-menuLabel" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="hugagent-file-menu" data-i18n="file">文件</button><div class="tb-drop" id="hugagent-file-menu" role="menu" aria-label="文件" data-i18n-aria="file">
+  <button class="tb-item" type="button" role="menuitem" tabindex="-1" data-act="new_window"><span data-i18n="new_window">新建窗口</span><span class="tb-shortcut" aria-hidden="true">Ctrl+Shift+N</span></button>
   <button class="tb-item" type="button" role="menuitem" tabindex="-1" data-act="new_chat"><span data-i18n="new_chat">新建对话</span><span class="tb-shortcut" aria-hidden="true">Ctrl+N</span></button>
   <button class="tb-item" type="button" role="menuitem" tabindex="-1" data-act="open_folder"><span data-i18n="open_folder">打开文件夹…</span></button>
   <button class="tb-item" type="button" role="menuitem" tabindex="-1" data-act="run_mode"><span data-i18n="run_mode">运行模式…</span></button>
@@ -622,7 +624,7 @@ if(new URLSearchParams(location.search).get('quickask')==='1'){
 var desktopCopy={
   'zh-CN':{
     chrome:'桌面菜单栏',app_menu:'应用菜单',
-    file:'文件',edit:'编辑',view:'视图',help:'帮助',new_chat:'新建对话',run_mode:'运行模式…',open_folder:'打开文件夹…',
+    file:'文件',edit:'编辑',view:'视图',help:'帮助',new_chat:'新建对话',new_window:'新建窗口',run_mode:'运行模式…',open_folder:'打开文件夹…',
     server_config:'设置服务器地址…',local_server:'本机服务…',quit:'退出',undo:'撤销',redo:'重做',
     cut:'剪切',copy:'复制',paste:'粘贴',select_all:'全选',reload:'重新加载',fullscreen:'全屏',
     check_update:'检查更新…',website:'访问官网',about:'关于',minimize:'最小化',
@@ -630,7 +632,7 @@ var desktopCopy={
   },
   en:{
     chrome:'Desktop menu bar',app_menu:'Application menu',
-    file:'File',edit:'Edit',view:'View',help:'Help',new_chat:'New Chat',run_mode:'Run Mode…',open_folder:'Open Folder…',
+    file:'File',edit:'Edit',view:'View',help:'Help',new_chat:'New Chat',new_window:'New Window',run_mode:'Run Mode…',open_folder:'Open Folder…',
     server_config:'Server Address…',local_server:'Local Service…',quit:'Exit',undo:'Undo',redo:'Redo',
     cut:'Cut',copy:'Copy',paste:'Paste',select_all:'Select All',reload:'Reload',fullscreen:'Full Screen',
     check_update:'Check for Updates…',website:'Visit Website',about:'About',minimize:'Minimize',
@@ -689,7 +691,7 @@ document.addEventListener('focusin',function(event){if(!bar.contains(event.targe
 document.addEventListener('keydown',function(event){
   var key=String(event.key||'').toLowerCase();
   if(event.ctrlKey&&!event.altKey&&key==='n'){
-    event.preventDefault();sentinel('/__desktop/menu?action=new_chat');
+    event.preventDefault();sentinel('/__desktop/menu?action='+(event.shiftKey?'new_window':'new_chat'));
   }else if(event.ctrlKey&&!event.altKey&&key==='r'){
     event.preventDefault();sentinel('/__desktop/menu?action=reload');
   }else if(event.key==='F11'){
@@ -1628,6 +1630,10 @@ mod tests {
 
     #[test]
     fn windows_titlebar_has_compact_localized_menus_without_a_context_tab() {
+        assert!(TB_MENU.contains("data-act=\"new_window\""));
+        assert!(TB_JS.contains("new_window:'新建窗口'"));
+        assert!(TB_JS.contains("new_window:'New Window'"));
+        assert!(TB_JS.contains("event.shiftKey?'new_window':'new_chat'"));
         let block = titlebar_block(TB_OFFSET_SPA);
         assert!(!block.contains("tb-logo"));
         assert!(!block.contains(brand::LOGIN_LOGO_URL));

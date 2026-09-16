@@ -10,6 +10,7 @@ import { useAuthStore, useCatalogStore, useChatStore } from '../../stores';
 import { userScopedKey } from '../../storage';
 import { formatDateTime } from '../../utils/date';
 import { getSiteVisibilityTag } from '../../editionSiteVisibility';
+import { SitePasswordTag } from '../sites/SitePasswordField';
 import '../../styles/sites.css';
 
 const SHARE_RECORDS_CACHE_KEY = 'hugagent_share_records_cache';
@@ -35,6 +36,7 @@ function SiteShareSection() {
             <span className="jx-shareSiteName">{site.title}</span>
             <a className="jx-shareSiteUrl" href={site.url} target="_blank" rel="noopener noreferrer">{fullUrl}</a>
             <Tag color={visibilityTag.color}>{visibilityTag.label}</Tag>
+            <SitePasswordTag site={site} />
             <span className="jx-shareSiteViews"><EyeOutlined /> {site.view_count}</span>
             <CopyButton text={fullUrl} size="small" />
           </div>
