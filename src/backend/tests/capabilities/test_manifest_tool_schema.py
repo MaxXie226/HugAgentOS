@@ -44,10 +44,10 @@ def test_display_only_entry_is_not_a_usable_schema():
 
 def test_argument_less_tool_is_still_a_captured_schema():
     """A server may describe an argument-less tool tersely; that is not a gap."""
-    assert has_usable_schema({"name": "list_project_sites", "inputSchema": ARGLESS_SCHEMA})
-    assert has_usable_schema({"name": "list_project_sites", "inputSchema": {"type": "object"}})
+    assert has_usable_schema({"name": "list_sites", "inputSchema": ARGLESS_SCHEMA})
+    assert has_usable_schema({"name": "list_sites", "inputSchema": {"type": "object"}})
     assert uses_manifest_schema(
-        _cfg([{"name": "list_project_sites", "inputSchema": {"type": "object"}}])
+        _cfg([{"name": "list_sites", "inputSchema": {"type": "object"}}])
     )
 
 
@@ -62,13 +62,13 @@ def test_client_withholds_the_tool_it_cannot_describe():
         mcp_config=HttpMCPConfig(url="https://cloud.example/call"),
         manifest_tools=[
             {"name": "publish_site", "description": "发布站点"},
-            {"name": "list_project_sites", "description": "查询站点", "inputSchema": ARGLESS_SCHEMA},
+            {"name": "list_sites", "description": "查询站点", "inputSchema": ARGLESS_SCHEMA},
         ],
         gateway_invoke_url="https://cloud.example/call",
         schema_hash="hash",
     )
     names = [tool.name for tool in client._raw_manifest_tools()]
-    assert names == ["list_project_sites"], "参数丢失的工具不能交给模型"
+    assert names == ["list_sites"], "参数丢失的工具不能交给模型"
 
 
 def test_captured_schema_survives_a_plugin_upgrade():

@@ -109,10 +109,15 @@ export function buildDesktopRuntime({ desktopDir, repoRoot, sourceRoot, python }
     "--executable", config.executable,
   ], { cwd: repoRoot });
   mkdirSync(join(runtimeRoot, "licenses"), { recursive: true });
-  copyFileSync(join(desktopDir, "licenses", "OfficeCLI-LICENSE.txt"),
-    join(runtimeRoot, "licenses", "OfficeCLI-LICENSE.txt"));
+  for (const name of ["OfficeCLI-LICENSE.txt", "Pandoc-COPYING.md", "Office-runtime-NOTICES.txt", "Git-Bash-NOTICES.txt"]) {
+    copyFileSync(join(desktopDir, "licenses", name), join(runtimeRoot, "licenses", name));
+  }
   const nativeTools = readJson(join(runtimeRoot, "native-tools.json"));
 
+  copyFileSync(
+    join(repoRoot, "src/backend/services/script_runner_service/runtime_tools.py"),
+    join(runtimeRoot, "runtime_tools.py"),
+  );
   const smokeTest = join(runtimeRoot, "runtime-smoke.py");
   copyFileSync(join(desktopDir, "scripts", "runtime-smoke.py"), smokeTest);
   const pythonVersion = capture(executable, ["-c", "import platform; print(platform.python_version())"]);
@@ -132,6 +137,7 @@ export function buildDesktopRuntime({ desktopDir, repoRoot, sourceRoot, python }
   );
   run(executable, [smokeTest, "--source", sourceRoot], { cwd: sourceRoot });
   signMacRuntime(runtimeRoot);
+  run(executable, [smokeTest, "--native-only"], { cwd: runtimeRoot });
 
   rmSync(archive, { force: true });
   run(
@@ -216,7 +222,7 @@ function directorySize(root) {
   return total;
 }
 
-function signMacRuntime(root) {
+export function signMacRuntime(root) {
   if (process.platform !== "darwin") return;
   const identity = process.env.APPLE_SIGNING_IDENTITY?.trim() || "-";
   if (identity === "-") {
@@ -225,11 +231,14 @@ function signMacRuntime(root) {
     );
   }
   const files = [];
+  const bundles = [];
   const visit = (directory) => {
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
       const path = join(directory, entry.name);
-      if (entry.isDirectory()) visit(path);
-      else if (!entry.isSymbolicLink()) files.push(path);
+      if (entry.isDirectory()) {
+        visit(path);
+        if (/\.(app|framework|appex|xpc|mdimporter|qlgenerator)$/.test(path)) bundles.push(path);
+      } else if (!entry.isSymbolicLink()) files.push(path);
     }
   };
   visit(root);
@@ -240,5 +249,15 @@ function signMacRuntime(root) {
     if (identity !== "-") args.push("--timestamp", "--options", "runtime");
     args.push(path);
     run("/usr/bin/codesign", args);
+  }
+  // Re-seal nested application resources after signing their Mach-O files.
+  for (const path of bundles) {
+    const args = ["--force", "--sign", identity];
+    if (identity !== "-") args.push("--timestamp", "--options", "runtime");
+    args.push(path);
+    run("/usr/bin/codesign", args);
+  }
+  for (const path of bundles.filter((path) => path.endsWith(".app"))) {
+    run("/usr/bin/codesign", ["--verify", "--deep", "--strict", path]);
   }
 }

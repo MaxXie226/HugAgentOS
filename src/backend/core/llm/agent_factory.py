@@ -2078,13 +2078,6 @@ async def create_agent_executor(
             ),
         )
 
-    if not disable_tools and (project_ctx or {}).get("project_is_local"):
-        from core.llm.tools.site_tools import register_project_site_tools
-
-        register_project_site_tools(
-            toolkit, project_id=project_ctx["project_id"], user_id=current_user_id,
-        )
-
     # ── 跨会话历史（list_related_chats / read_chat） ──
     # 只读、按 user_id 锁死作用域，注册在收窄/标准两条路之前：用户可以在任何模式下把
     # 一段旧会话引用进来，注入的名片明确要求「细节去 read_chat 取」，模式收窄了工具却

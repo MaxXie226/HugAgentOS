@@ -265,19 +265,20 @@ Records are eventually visible. Gateway persistence uses a bounded asynchronous 
 
 ### Explicit site editing targets and skill updates
 
-Editing works from project chats, new chats, existing chats, or site cards. In local projects,
-the agent calls `list_project_sites` to discover current-account site IDs and source/output directories.
+Editing works from project chats, new chats, existing chats, or site cards. The agent calls the
+Sites plugin's `list_sites` to discover editable site IDs and source/output directories; local and
+cloud modes share this one tool.
 It selects according to the user's request and asks when candidates are ambiguous.
 Updates explicitly pass the original `site_id` and the actual page/build output `src_dir`.
 Local publishing no longer defaults to the project root or selects a site from chat metadata.
 Omit the ID only for an intentional new site. Verify the returned ID, URL, version and actual homepage.
 
-Builtin Sites version 1.2.0 upgrades existing older builtin instructions on service startup, including
+Builtin Sites version 1.3.0 upgrades existing older builtin instructions on service startup, including
 global and private installations. Enabled states and connection settings are preserved; uninstalled
 or user-imported plugins are untouched. Update the cloud backend and site MCP plus the local backend.
 Desktop capability synchronization then downloads the new cloud skill hash and package.
 Rebuilding the desktop alone does not replace installed skills in the cloud database.
-Verify that a real site conversation has `list_project_sites` and loads the explicit-update instructions.
+Verify that a real site conversation has `list_sites` and loads the explicit-update instructions.
 
 
 On macOS, the main interface extends to the top of the window without a separate blank title row above the content. The sidebar background continues behind the traffic lights, while its brand and buttons retain safe spacing. The collapsed sidebar is 88px wide to keep native window controls clear of content. Drag the sidebar top or empty space in the content header to move the window; double-click to toggle maximization. Standalone setup and login pages retain a top inset.
@@ -312,7 +313,14 @@ Local project references read the current original contents on subsequent access
 Full desktop runtimes include pinned OfficeCLI 1.0.144, available through the local `bash` tool as `officecli --version`.
 The release builder downloads and verifies its SHA-256 before bundling it; first installation requires no additional download.
 Native tool manifests and runtime build/smoke scripts participate in the dependency fingerprint, so changes replace old runtimes.
-Chromium for screenshots and LibreOffice for Office-to-PDF conversion are separate dependencies; OfficeCLI does not replace them.
+Full desktop runtimes also bundle Pandoc 3.11 and LibreOffice 26.2.6 in private application directories.
+The builder verifies pinned upstream sizes and SHA-256 hashes and extracts the native ZIP/TAR, MSI administrative
+image, or DMG without a system installation. Linux builders require dpkg-deb and LibreOffice's system libraries.
+Users need no separate Pandoc or LibreOffice installation. Build and activation checks exercise a DOCX text roundtrip
+and DOCX-to-PDF conversion; failures stop activation. macOS builds re-sign the nested application bundle.
+Tool changes invalidate the runtime fingerprint. Full installers and extracted runtimes are larger; thin installers
+do not include these tools. Each architecture still requires native build validation. Chromium remains a separate
+dependency for screenshots.
 
 A local preview 401 should be diagnosed at the desktop identity bridge, without repeatedly signing the user out of the cloud.
 Preview and local-open requests both recognize the bridge identity and retain project access checks.
@@ -349,3 +357,30 @@ If an older client reports that it cannot open the update progress card after co
 In hybrid mode, chat uploads follow the conversation's execution location; project conversations follow their project. Changing the location after selecting a file uploads the original file to the final backend before sending. Regular chat and plan mode use the same rules. Upload or referenced-file failures preserve the draft and attachments for retry.
 
 Selecting a cloud My Space file for a local task downloads it with the current account and saves a local attachment, preserving the source file. Preview, download, and native open follow the file's actual ownership. This fix requires a desktop package update. For historical attachments uploaded to the wrong backend by older clients, select and send the original files again; upgrading does not automatically migrate historical attachments.
+
+
+### Private Bash on Windows
+
+Full Windows installers bundle private Bash, the MSYS runtime, and GNU file tools from
+Git for Windows 2.55.0.5. Release builders verify the pinned download size and SHA-256.
+Installation extracts the tools offline into `native/git-bash` in the private runtime;
+users need neither Git nor WSL, and the system PATH is unchanged.
+The runner invokes private `usr/bin/bash.exe` directly. A damaged declared private
+runtime fails explicitly instead of falling back to a developer's system Git.
+
+Before packaging and activation, the runtime smoke test executes Bash with a PATH
+excluding system Git. It exercises Chinese/space-containing directories, the
+`find/sort/head/cut` pipeline, `grep` searches, and common file commands. Failure
+blocks activation. The dependency fingerprint changes, so upgrades replace old
+runtimes that lack Bash. Other platforms retain their system Bash; thin cloud-only
+packages do not carry this runtime.
+
+Rebuild and distribute the full Windows client to deliver this fix. Updating only
+the cloud backend cannot repair existing desktop installations.
+
+### Multiple windows
+
+Choose File → New Window or press Ctrl+Shift+N to open another desktop window.
+Windows share authentication, configuration, and the local service, while conversation navigation
+is independent. Closing one window keeps other visible windows running; the final window uses
+the existing close preference.

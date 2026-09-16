@@ -439,7 +439,18 @@ NSIS 默认保留业务数据和顶层 `skills`、`plugins`、`agents`、`mcp.js
 
 依赖指纹覆盖 Python 锁文件、原生工具清单、运行时构建/归档/自检脚本和许可证。
 修改这些输入后，下次构建及客户端安装不会复用旧运行时；只改业务源码仍可复用未变更的依赖。
-OfficeCLI 不等同于 Chromium 或 LibreOffice：截图与 PDF 转换仍需要对应浏览器/转换程序。
+完整包同时携带 Pandoc 3.11 与 LibreOffice 26.2.6。Pandoc 位于私有 Python 可执行目录，
+LibreOffice 的完整程序、字体和资源位于运行时的 native/libreoffice；后端优先按运行时清单
+查找它们。用户安装客户端时离线解压这些工具，无需另装 Pandoc 或 LibreOffice。
+截图仍需要 Chromium。
+
+发布构建机按当前原生平台提取官方 ZIP/TAR、DMG 或 MSI；Windows 使用 MSI 管理映像提取，
+Linux 使用 dpkg-deb（仅提取文件），macOS 使用 hdiutil/ditto。不向构建机或用户系统安装
+LibreOffice，不注册文件关联。五个平台资产均锁定大小与 SHA-256，并保留许可证及源码链接。
+macOS 对嵌套 LibreOffice.app 重新签名并验证封装。工具更新会改变依赖指纹。
+构建和安装自检实际执行 Markdown→DOCX→文本及 DOCX→PDF；缺失、版本不符或转换失败即阻止
+运行时激活。完整包体积与解压空间会增加。精简包不携带这些工具。
+跨架构发行仍须在对应原生构建机完成验证；Linux 构建机需具备 dpkg-deb 及 LibreOffice 所需系统库。
 
 本机文件预览与路径查询均识别桌面桥接身份，访问原文件时保留项目和目录权限检查。
 本机预览的 401 不会触发云端退出登录；云端会话过期保持原有登录流程。
@@ -460,3 +471,38 @@ HTML 加载失败显示可读提示，正常 HTML 在不允许同源访问的脚
 连接中断会退避重连；旧服务器不支持通知时约每 5 分钟检查一次。新旧客户端均保留手动“检查更新”。快速通知需要同时升级发布服务器后端和桌面包；仅升级客户端会使用低频兼容检查。发现新版仍只提示，不会自动下载安装。
 
 更新进度窗通过客户端既有回环服务加载内嵌页面，避免 Windows 对 data: 页面的兼容性限制。Windows 发布前应在原生构建机完成正式构建后、在交互式桌面会话运行 powershell -ExecutionPolicy Bypass -File desktop/scripts/test-update-progress.ps1，验证真实 WebView2 窗口及进度渲染；此测试不下载或安装更新。
+
+
+### Windows 私有 Bash
+
+Windows 完整安装包携带来自 Git for Windows 2.55.0.5 的私有 Bash、MSYS 运行库和
+GNU 文件命令。构建机下载固定资产并校验大小及 SHA-256，用户安装时离线解压到
+运行时的 `native/git-bash`，不需要另装 Git、WSL，也不修改系统 PATH。
+运行器直接调用私有 `usr/bin/bash.exe`；随包运行时损坏时明确失败，不回退到系统 Git。
+
+构建和安装激活前，使用不含系统 Git 的 PATH 实际运行 Bash，检查中文及带空格目录、
+`find/sort/head/cut` 管道、`grep` 搜索与常用文件命令；自检失败阻止该运行时激活。
+新增依赖会改变运行时指纹，升级时不会复用旧的缺少 Bash 的依赖包。
+非 Windows 平台沿用系统 Bash，精简云端包不携带此运行时。
+
+此修复需要重新构建并分发 Windows 完整客户端；只更新云端后端不能修复已安装的旧包。
+
+
+原生 Windows 构建机可运行独立验收（输出目录必须尚不存在，保留结果供核验）：
+
+```powershell
+python desktop/scripts/verify-windows-bash.py --archive <已下载的固定版本Git归档> --output <新的临时目录>
+```
+
+验收使用原有 SHA-256 校验，实际经过打包、搬移、解包后再执行自检；随后临时移走
+`grep.exe`，确认自检拒绝缺失依赖，再恢复文件。运行器与自检共享 GNU 命令优先于
+Windows System32 的 PATH 顺序。
+
+
+### 多窗口
+
+Windows、macOS、Linux 的“文件 → 新建窗口”打开一个独立桌面窗口。
+快捷键为 Windows/Linux 的 Ctrl+Shift+N、macOS 的 Cmd+Shift+N；UOS Electron 同样支持。
+各窗口共享登录、服务器配置和本机服务，菜单、窗口控制及文件夹选择作用于发起窗口。
+多个普通窗口可见时关闭一个不会退出客户端；最后一个可见窗口继续遵循关闭到托盘/退出偏好
+（macOS 关闭窗口后保留应用）。菜单“退出”仍退出整个应用。

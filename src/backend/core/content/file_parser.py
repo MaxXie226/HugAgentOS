@@ -29,6 +29,7 @@ from typing import Optional
 
 import requests
 
+from core.content.office import find_libreoffice_binary, find_pandoc_binary
 from core.infra.proc import no_window_kwargs
 
 logger = logging.getLogger(__name__)
@@ -211,7 +212,7 @@ def _docx_bytes_to_markdown(docx_bytes: bytes) -> str:
 
         try:
             result = subprocess.run(
-                ["pandoc", input_path, "-t", "markdown", "--wrap=none"],
+                [find_pandoc_binary() or "pandoc", input_path, "-t", "markdown", "--wrap=none"],
                 capture_output=True,
                 text=True,
                 timeout=60,
@@ -245,7 +246,7 @@ def _convert_to_docx_bytes(file_bytes: bytes, suffix: str) -> bytes:
         try:
             result = subprocess.run(
                 [
-                    "libreoffice",
+                    find_libreoffice_binary() or "libreoffice",
                     "--headless",
                     "--convert-to", "docx",
                     "--outdir", tmpdir,
@@ -668,7 +669,7 @@ def _convert_xls_to_xlsx(file_bytes: bytes) -> bytes:
         try:
             result = subprocess.run(
                 [
-                    "libreoffice",
+                    find_libreoffice_binary() or "libreoffice",
                     "--headless",
                     "--convert-to", "xlsx",
                     "--outdir", tmpdir,

@@ -4168,6 +4168,8 @@ export interface SiteItem extends SiteEditionFields {
   chat_id: string | null;
   /** Site source project id; when set → the "Edit" action on the card can continue editing; null for legacy sites */
   project_id: string | null;
+  /** 站点已设访问密码（密码本身不会下发）。 */
+  has_password: boolean;
   /** Current actor can edit this source project. */
   editable: boolean;
   permission?: 'none' | 'view' | 'edit' | 'admin';
@@ -4192,6 +4194,7 @@ function toSiteItem(raw: JsonObject): SiteItem {
     total_size_bytes: Number(raw.total_size_bytes ?? 0),
     chat_id: typeof raw.chat_id === 'string' ? raw.chat_id : null,
     project_id: typeof raw.project_id === 'string' ? raw.project_id : null,
+    has_password: raw.has_password === true,
     editable: Boolean(raw.editable),
     permission: raw.permission as SiteItem['permission'],
     can_manage: raw.can_manage === true,
@@ -4229,6 +4232,30 @@ export async function updateSite(
   const wrapped = await apiRequest<unknown>(`/v1/sites/${encodeURIComponent(siteId)}`, {
     method: 'PATCH',
     body: JSON.stringify(data),
+  }, siteTarget(origin));
+  return { ...toSiteItem(unwrapData<JsonObject>(wrapped)), origin };
+}
+
+/** 设置 / 修改站点访问密码（仅站点管理者）。 */
+export async function setSitePassword(
+  siteId: string,
+  password: string,
+  origin?: 'cloud' | 'local',
+): Promise<SiteItem> {
+  const wrapped = await apiRequest<unknown>(`/v1/sites/${encodeURIComponent(siteId)}/password`, {
+    method: 'PUT',
+    body: JSON.stringify({ password }),
+  }, siteTarget(origin));
+  return { ...toSiteItem(unwrapData<JsonObject>(wrapped)), origin };
+}
+
+/** 清除站点访问密码，站点回到"凭链接直接访问"。 */
+export async function clearSitePassword(
+  siteId: string,
+  origin?: 'cloud' | 'local',
+): Promise<SiteItem> {
+  const wrapped = await apiRequest<unknown>(`/v1/sites/${encodeURIComponent(siteId)}/password`, {
+    method: 'DELETE',
   }, siteTarget(origin));
   return { ...toSiteItem(unwrapData<JsonObject>(wrapped)), origin };
 }

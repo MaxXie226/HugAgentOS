@@ -82,7 +82,7 @@ def test_windows_git_bash_receives_msys_workspace_path():
     assert server._execution_workspace_root("bash", workspace, "nt") == (
         "/c/Users/Aaron/AppData/Local/com.hugagent.desktop/local-server/data/workspace"
     )
-    assert server._execution_workspace_root("python", workspace, "nt") == workspace
+    assert server._execution_workspace_root("python", workspace, "nt") == workspace.replace(chr(92), "/")
 
 
 def test_timeout_kills_the_whole_process_group(monkeypatch, tmp_path):

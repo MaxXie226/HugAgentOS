@@ -41,11 +41,11 @@ async def package_local_site(arguments, headers):
         if local_mode_enabled():
             # Name the missing argument and how to fill it for the case at hand:
             # a new site has nothing to look up, so pointing every failure at
-            # list_project_sites leaves that path with no way forward.
+            # list_sites leaves that path with no way forward.
             raise ValueError(
                 "本机发布必须显式传 src_dir（页面根目录的绝对路径，需含 index.html）。"
                 "新建站点：把刚生成页面的目录传给 src_dir，不传 site_id。"
-                "编辑已发布站点：先调 list_project_sites 取原 site_id 与 publish_dir，"
+                "编辑已发布站点：先调 list_sites 取原 site_id 与 publish_dir，"
                 "再以 src_dir=publish_dir 重新发布。"
             )
         src = project_dir or "/workspace/site"
@@ -171,9 +171,8 @@ def publish_uploaded_site(user_id, data, options):
     }
 
 
-async def forward_local_publish(body):
-    """Sites are cloud-hosted: a local site MCP's publish call goes to the gateway."""
-    from core.infra.responses import success_response
+async def forward_local_site_tool(tool_name, arguments, *, user_id, chat_id=""):
+    """Sites are cloud-hosted: a local site MCP's call goes to the cloud gateway plugin."""
     from core.llm.agent_factory import _inject_runtime_headers
     from core.llm.mcp_pool import make_client
     from core.services.desktop_cloud_bridge import cloud_gateway_mcp_configs
@@ -185,20 +184,20 @@ async def forward_local_publish(body):
             continue
         configs = _inject_runtime_headers(
             {sid: config},
-            current_user_id=body.user_id,
-            chat_id=body.chat_id,
+            current_user_id=user_id,
+            chat_id=chat_id,
             enabled_kb_ids=[],
             channel_origin=None,
             reranker_enabled=False,
         )
         client = make_client(sid, configs[sid], is_stateful=False)
         try:
-            tool = await client.get_tool("publish_site")
-            result = await tool(**body.model_dump(exclude={"user_id", "chat_id"}))
+            tool = await client.get_tool(tool_name)
+            result = await tool(**arguments)
             for block in result.content:
                 if getattr(block, "type", None) == "text":
-                    return success_response(data=json.loads(block.text))
-            return success_response(data={"error": "云端发布结果未知，请先在云端站点列表核对"})
+                    return json.loads(block.text)
+            return {"error": f"云端 {tool_name} 结果未知，请在云端站点列表核对"}
         finally:
             await client.close()
-    return success_response(data={"error": "云端站点发布能力不可用，请启用云端站点插件后重试"})
+    return {"error": "云端站点能力不可用，请启用云端站点插件后重试"}

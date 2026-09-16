@@ -63,6 +63,10 @@ class Site(SiteScopeMixin, Base):
     total_size_bytes = Column(BigInteger, nullable=False, default=0)
     # HTML page view count (asset files not counted)
     view_count = Column(BigInteger, nullable=False, default=0)
+    # Access password (Argon2id hash only; plaintext is never stored or returned).
+    # Orthogonal to visibility: visibility decides which signed-in users may see the
+    # site, the password decides whether a stranger holding the link must unlock it first.
+    access_password_hash = Column(String(255))
     extra_data = Column("metadata", JSONType, default={})
     created_at = Column(TIMESTAMP(timezone=True), default=datetime.utcnow)
     updated_at = Column(TIMESTAMP(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)

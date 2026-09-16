@@ -1,0 +1,22 @@
+Private Windows Bash runtime
+============================
+
+Source distribution: Git for Windows 2.55.0.windows.5 (x86_64)
+https://github.com/git-for-windows/git/releases/tag/v2.55.0.windows.5
+
+The Windows runtime includes the upstream usr/bin/bash.exe and sh.exe,
+the usr/ MSYS runtime/tool tree, configuration, and upstream component licenses.
+Git GUIs and the MinGW Git application are not included. Virtual MSYS /proc links
+are not extracted as Windows filesystem links. This is an application-private
+copy; no system installation, PATH modification, or user shell profile is needed.
+
+Bash and GNU tools are distributed under their respective GPL licenses; MSYS
+and other components retain their individual licenses. Upstream license files
+are preserved below native/git-bash. Source package locations and build recipes:
+https://github.com/git-for-windows/MSYS2-packages
+https://github.com/git-for-windows/build-extra
+https://github.com/git-for-windows/msys2-runtime
+https://repo.msys2.org/msys/sources/
+
+Release distributors must retain these notices and the corresponding source
+distribution obligations of the included components.

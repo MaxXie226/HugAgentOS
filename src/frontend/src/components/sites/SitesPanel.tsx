@@ -46,6 +46,7 @@ import {
   getSiteVisibilityOptions,
   type SiteVisibility,
 } from '../../editionSiteVisibility';
+import { SitePasswordField, SitePasswordTag } from './SitePasswordField';
 import { useIsMobileViewport } from '../../hooks/useIsMobileViewport';
 import { useCatalogStore } from '../../stores';
 import { useChatStore } from '../../stores/chatStore';
@@ -201,7 +202,10 @@ function SiteManageModal({
       .then((r) => { setSubmissions(r.items); setSubmissionTotal(r.total); })
       .catch(() => {});
     void listSiteKv(site.site_id, site.origin).then((r) => setKvItems(r.items)).catch(() => {});
-  }, [site, form]);
+    // 依赖用 site_id 而不是整个 site 对象：站点被 onChanged 刷新后（例如刚改完密码）
+    // 不该重置表单，否则会冲掉用户没保存的标题/地址改动。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [site.site_id, form]);
 
   const handleSave = async () => {
     try {
@@ -355,6 +359,9 @@ function SiteManageModal({
                   />
                 </Form.Item>
                 <EditionSiteVisibilityFields visibility={visibility} />
+                <Form.Item label={t('访问密码')} extra={t('开启后访客需输入密码才能打开站点')}>
+                  <SitePasswordField site={site} onChanged={onChanged} />
+                </Form.Item>
                 <Button type="primary" onClick={handleSave} loading={saving}>{t('保存')}</Button>
               </Form>
             ),
@@ -585,6 +592,7 @@ export function SitesPanel() {
                   <div className="jx-sites-cardHead">
                     <span className="jx-sites-cardTitle">{site.title}</span>
                     <VisibilityTag site={site} />
+                    <SitePasswordTag site={site} />
                   </div>
                   <a
                     className="jx-sites-cardUrl"
@@ -657,9 +665,11 @@ export function SitesPanel() {
         <SiteManageModal
           site={managing}
           onClose={() => setManaging(null)}
-          onChanged={(updated) =>
-            setSites((prev) => prev.map((s) => (s.site_id === updated.site_id ? updated : s)))
-          }
+          onChanged={(updated) => {
+            setSites((prev) => prev.map((s) => (s.site_id === updated.site_id ? updated : s)));
+            // 弹窗开着时也换成最新站点，省得里面的控件各自再存一份镜像状态。
+            setManaging((prev) => (prev && prev.site_id === updated.site_id ? updated : prev));
+          }}
         />
       ) : null}
 

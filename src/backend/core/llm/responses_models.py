@@ -23,7 +23,7 @@ from typing import Any, AsyncGenerator, Optional, get_args
 import httpx
 from agentscope.credential import OpenAICredential
 from agentscope.formatter import OpenAIResponseFormatter
-from agentscope.message import Msg, ThinkingBlock
+from agentscope.message import Msg, ThinkingBlock, ToolCallBlock
 from agentscope.model import ChatResponse, OpenAIResponseModel
 from agentscope.tool._types import ToolChoice
 
@@ -219,6 +219,37 @@ def _restore_reasoning_items(
     return restored
 
 
+def _repair_tool_output_call_ids(
+    msgs: list[Msg], items: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """把工具结果的 ``call_id`` 换回发起那次调用时上游给的那一个。
+
+    Responses 线上一次函数调用有**两个**互不相同的 id：条目 id（``function_call.id``）
+    与调用 id（``function_call.call_id``），回传结果时必须按后者配对。AgentScope 建
+    ``ToolResultBlock`` 时只带上了条目 id（``id=tool_call.id``），格式化又直接拿它当
+    ``function_call_output.call_id`` 发出去，于是两边对不上。
+
+    DeepSeek 官方端点正是两者不同（条目 id 是 uuid，调用 id 形如 ``call_00_…``），整轮
+    请求会被打回 ``No tool call found for tool output with call_id …``；只要模型调了工具，
+    这一轮就必然失败。调用块自己同时带着这两个 id，这里按它把结果侧改正。
+
+    历史回放时旧块只剩条目 id，两侧都退回同一个值，配对依然自洽。
+    """
+    call_ids = {
+        block.id: str(getattr(block, "call_id", None) or "")
+        for msg in msgs
+        for block in msg.content or []
+        if isinstance(block, ToolCallBlock)
+    }
+    for item in items:
+        if not isinstance(item, dict) or item.get("type") != "function_call_output":
+            continue
+        call_id = call_ids.get(str(item.get("call_id") or ""))
+        if call_id:
+            item["call_id"] = call_id
+    return items
+
+
 class ResponsesReplayFormatter(
     ReasoningReplayMixin, ResponsesToolMediaMixin, OpenAIResponseFormatter
 ):
@@ -248,7 +279,7 @@ class ResponsesReplayFormatter(
 
     async def format(self, msgs: list[Msg]) -> list[dict[str, Any]]:
         items = await super().format(msgs)
-        return _restore_reasoning_items(msgs, items)
+        return _restore_reasoning_items(msgs, _repair_tool_output_call_ids(msgs, items))
 
 
 class OpenAICompatResponsesModel(

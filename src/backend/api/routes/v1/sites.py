@@ -16,7 +16,8 @@ from core.services.site_access_policy import (
     site_management_permission,
     site_scope_ref,
 )
-from core.services.site_service import SiteService
+from core.services.site_password import MAX_PASSWORD_LENGTH
+from core.services.site_service import KV_READ_LEVEL, KV_WRITE_LEVEL, SiteService
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -34,6 +35,14 @@ class RollbackRequest(BaseModel):
     version: int = Field(..., description="要回滚到的历史版本号", ge=1)
 
 
+class SitePasswordRequest(BaseModel):
+    password: str = Field(
+        ...,
+        description="站点访问密码（明文只用于设置，不会回传）",
+        max_length=MAX_PASSWORD_LENGTH,
+    )
+
+
 def _site_to_dict(site, permission: str = "admin") -> dict:
     return {
         "site_id": site.site_id,
@@ -47,6 +56,8 @@ def _site_to_dict(site, permission: str = "admin") -> dict:
         "file_count": site.file_count,
         "total_size_bytes": site.total_size_bytes,
         "view_count": site.view_count or 0,
+        # 只回传「有没有设密码」，密码本身不出库
+        "has_password": bool(site.access_password_hash),
         "chat_id": site.chat_id,
         # project_id set → the site has a source project and can keep being edited via the card's "Edit"; empty for old sites → not editable
         "project_id": getattr(site, "project_id", None),
@@ -119,6 +130,27 @@ def rollback_site(
     return success_response(data=_site_to_dict(site))
 
 
+@router.put("/{site_id}/password", summary="设置 / 修改站点访问密码")
+def set_site_password(
+    site_id: str,
+    body: SitePasswordRequest,
+    user: UserContext = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    site = SiteService(db).set_access_password(site_id, user.user_id, body.password)
+    return success_response(data=_site_to_dict(site))
+
+
+@router.delete("/{site_id}/password", summary="清除站点访问密码")
+def clear_site_password(
+    site_id: str,
+    user: UserContext = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    site = SiteService(db).clear_access_password(site_id, user.user_id)
+    return success_response(data=_site_to_dict(site))
+
+
 @router.get("/{site_id}/submissions", summary="站点表单数据列表")
 def list_site_submissions(
     site_id: str,
@@ -175,8 +207,8 @@ def list_site_kv(
     db: Session = Depends(get_db),
 ):
     service = SiteService(db)
-    site = service.get_owned(site_id, user.user_id)
-    rows = service.repo.kv_list(site.site_id)
+    site = service.get_owned(site_id, user.user_id, required=KV_READ_LEVEL)
+    rows, total = service.kv_list(site)
     return success_response(
         data={
             "items": [
@@ -187,7 +219,7 @@ def list_site_kv(
                 }
                 for r in rows
             ],
-            "total": service.repo.kv_count(site.site_id),
+            "total": total,
         }
     )
 
@@ -200,7 +232,7 @@ def delete_site_kv(
     db: Session = Depends(get_db),
 ):
     service = SiteService(db)
-    site = service.get_owned(site_id, user.user_id)
+    site = service.get_owned(site_id, user.user_id, required=KV_WRITE_LEVEL)
     deleted = service.kv_delete(site, key)
     return success_response(data={"deleted": deleted})
 
@@ -212,7 +244,7 @@ def clear_site_kv(
     db: Session = Depends(get_db),
 ):
     service = SiteService(db)
-    site = service.get_owned(site_id, user.user_id)
+    site = service.get_owned(site_id, user.user_id, required=KV_WRITE_LEVEL)
     cleared = service.repo.kv_clear(site.site_id)
     return success_response(data={"cleared": cleared})
 

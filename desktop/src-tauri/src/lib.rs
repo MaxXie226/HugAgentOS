@@ -176,10 +176,7 @@ async fn logout_desktop(app: tauri::AppHandle) {
         return;
     }
     let idle = app.state::<Shared>().login_idle_url();
-    if let Some(w) = app.get_webview_window("main") {
-        let _ = w.eval(format!("window.location.replace('{}')", idle));
-        let _ = w.set_focus();
-    }
+    navigate_session_windows(&app, &idle);
 }
 
 /// Invalidate async tasks before waiting for writes; revoke the old cloud session.
@@ -237,7 +234,7 @@ pub fn run() {
                     handle_deep_link(app, arg.clone());
                 }
             }
-            if let Some(w) = app.get_webview_window("main") {
+            if let Some(w) = app.get_webview_window(&active_desktop_label(app)) {
                 // 可能此前被「最小化到托盘」隐藏了，这里要先 show 再 focus。
                 let _ = w.show();
                 let _ = w.unminimize();
@@ -277,7 +274,20 @@ pub fn run() {
                 }
             }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                if window.label() != "main" {
+                if !is_desktop_window(window.label()) {
+                    return;
+                }
+                let other_visible = window.app_handle().webview_windows().values().any(|w| {
+                    is_desktop_window(w.label())
+                        && w.label() != window.label()
+                        && w.is_visible().unwrap_or(false)
+                });
+                if other_visible {
+                    // Keep the original window as a tray/reopen anchor; extra windows can be destroyed.
+                    if window.label() == "main" {
+                        api.prevent_close();
+                        let _ = window.hide();
+                    }
                     return;
                 }
                 api.prevent_close();
@@ -301,7 +311,7 @@ pub fn run() {
                         Some(prefs::CloseAction::Exit) => {
                             app.exit(0);
                         }
-                        None => open_close_confirm(&app),
+                        None => open_close_confirm(&app, window.label()),
                     }
                 }
             }
@@ -518,7 +528,7 @@ pub fn run() {
             } else {
                 format!("http://127.0.0.1:{}/__desktop/login", port)
             };
-            build_window(&handle, &start)?;
+            build_window(&handle, "main", &start)?;
             if !needs_initialization && !cfg.uses_local_server() {
                 spawn_startup_probe(
                     handle.clone(),
@@ -600,18 +610,69 @@ fn spawn_startup_probe(app: tauri::AppHandle, server_base: String, cookie_name: 
         if !shared.session_epoch.matches(expected) {
             return;
         }
-        if let Some(w) = app.get_webview_window("main") {
-            let _ = w.eval(format!(
-                "window.location.replace('{}')",
-                shared.login_idle_url()
-            ));
-        }
+        navigate_session_windows(&app, &shared.login_idle_url());
     });
+}
+
+pub(crate) fn is_desktop_window(label: &str) -> bool {
+    label == "main"
+        || label.strip_prefix("main-").is_some_and(|suffix| {
+            !suffix.is_empty() && suffix.bytes().all(|c| c.is_ascii_digit())
+        })
+}
+
+pub(crate) fn active_desktop_label(app: &tauri::AppHandle) -> String {
+    let windows = app.webview_windows();
+    windows
+        .values()
+        .filter(|w| is_desktop_window(w.label()))
+        .find(|w| w.is_focused().unwrap_or(false))
+        .or_else(|| {
+            windows.values()
+                .filter(|w| is_desktop_window(w.label()))
+                .find(|w| w.is_visible().unwrap_or(false))
+        })
+        .map(|w| w.label().to_string())
+        .unwrap_or_else(|| "main".to_string())
+}
+
+fn navigate_session_windows(app: &tauri::AppHandle, url: &str) {
+    for window in app.webview_windows().values() {
+        if is_desktop_window(window.label()) || window.label() == "quickask" {
+            let destination = if window.label() == "quickask" && url == app.state::<Shared>().home_url() {
+                format!("{url}?quickask=1")
+            } else {
+                url.to_string()
+            };
+            let target = serde_json::to_string(&destination).unwrap();
+            let _ = window.eval(format!("window.location.replace({target})"));
+        }
+    }
+}
+
+pub(crate) fn new_desktop_window(app: &tauri::AppHandle) {
+    static NEXT_WINDOW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let shared = app.state::<Shared>();
+    let cfg = config::load(&shared.config_dir);
+    let path = if !config::is_provisioned(&shared.config_dir) {
+        "/__desktop/init"
+    } else if cfg.uses_local_server() || (shared.hybrid_local && shared.local_server.needs_install()) {
+        "/__desktop/setup"
+    } else if shared.token.try_read().map(|token| token.is_some()).unwrap_or(false) {
+        "/"
+    } else {
+        "/__desktop/login"
+    };
+    let label = format!("main-{}", NEXT_WINDOW.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+    let url = format!("http://127.0.0.1:{}{path}", shared.port);
+    if let Err(error) = build_window(app, &label, &url) {
+        app.dialog().message(format!("无法新建窗口：{error}")).title(brand::NAME).show(|_| {});
+    }
 }
 
 /// 显示并聚焦主窗口（从托盘恢复 / 单实例再次拉起 / deep-link 回跳时用）。
 fn show_main_window(app: &tauri::AppHandle) {
-    if let Some(w) = app.get_webview_window("main") {
+    if let Some(w) = app.get_webview_window(&active_desktop_label(app)) {
         let _ = w.show();
         let _ = w.unminimize();
         let _ = w.set_focus();
@@ -670,9 +731,9 @@ fn toggle_quickask(app: &tauri::AppHandle) {
 
 /// 在主窗口打开「设置服务器地址」页。独立 WebView 小窗在部分 Windows/WebView2 环境下
 /// 可能只创建出空白窗口；复用已经完成初始化的主 WebView 更稳定，也不依赖 Tauri IPC。
-pub(crate) fn open_server_config(app: &tauri::AppHandle) {
+pub(crate) fn open_server_config_in(app: &tauri::AppHandle, label: &str) {
     let port = app.state::<Shared>().port;
-    if let Some(w) = app.get_webview_window("main") {
+    if let Some(w) = app.get_webview_window(label) {
         let url = format!("http://127.0.0.1:{port}/__desktop/server-config");
         let _ = w.eval(format!("window.location.assign('{url}')"));
         let _ = w.show();
@@ -729,7 +790,7 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
 /// 弹出「关闭确认」自定义窗（带「记住我的选择」勾选框）。按钮不走 Tauri IPC——
 /// 整页导航到哨兵路径 `/__desktop/close-decide?action=..&remember=..`，由本窗口的
 /// 导航守卫解析并执行（最小化 / 退出 + 是否记住）。远程源下 IPC 不可靠，导航守卫必触发。
-fn open_close_confirm(app: &tauri::AppHandle) {
+fn open_close_confirm(app: &tauri::AppHandle, target_label: &str) {
     // 已经开着就聚焦，别重复弹。
     if let Some(w) = app.get_webview_window("close-confirm") {
         let _ = w.center();
@@ -744,6 +805,7 @@ fn open_close_confirm(app: &tauri::AppHandle) {
         Err(_) => return,
     };
     let app_for_nav = app.clone();
+    let target_label = target_label.to_string();
     let _ = WebviewWindowBuilder::new(app, "close-confirm", WebviewUrl::External(parsed))
         .title(brand::NAME)
         .additional_browser_args(WEBVIEW_BROWSER_ARGS)
@@ -784,6 +846,7 @@ fn open_close_confirm(app: &tauri::AppHandle) {
                 }
             }
             let app2 = app_for_nav.clone();
+            let target_label = target_label.clone();
             tauri::async_runtime::spawn(async move {
                 let exit = action == "exit";
                 if remember {
@@ -806,7 +869,7 @@ fn open_close_confirm(app: &tauri::AppHandle) {
                 }
                 if exit {
                     app2.exit(0);
-                } else if let Some(mw) = app2.get_webview_window("main") {
+                } else if let Some(mw) = app2.get_webview_window(&target_label) {
                     let _ = mw.hide();
                 }
             });
@@ -818,12 +881,13 @@ fn open_close_confirm(app: &tauri::AppHandle) {
 
 /// 创建主窗口，并挂导航守卫：只放行本地反代 / Tauri 内部源，其余外部跳转
 /// （典型：会话过期后前端要跳外部 SSO 授权页）一律拦下，改走系统浏览器登录。
-fn build_window(app: &tauri::AppHandle, url: &str) -> tauri::Result<()> {
+fn build_window(app: &tauri::AppHandle, label: &str, url: &str) -> tauri::Result<()> {
     let parsed = url::Url::parse(url).expect("窗口起始 URL 非法");
     let app_for_nav = app.clone();
+    let window_label = label.to_string();
     let (width, height, min_width, min_height) = main_window_dimensions(app);
 
-    let builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(parsed))
+    let builder = WebviewWindowBuilder::new(app, label, WebviewUrl::External(parsed))
         .title(brand::NAME)
         .additional_browser_args(WEBVIEW_BROWSER_ARGS)
         // 同 quickask：禁用内建拖放拦截，HTML5 drop 事件才能携带文件进到页面
@@ -862,10 +926,11 @@ fn build_window(app: &tauri::AppHandle, url: &str) -> tauri::Result<()> {
                 // 而 on_navigation 是纯 Rust、一定触发。这里由壳子开系统浏览器 + 切等待态。
                 if path == "/__desktop/open-login" {
                     let app2 = app_for_nav.clone();
+                    let window_label = window_label.clone();
                     tauri::async_runtime::spawn(async move {
                         let shared = app2.state::<Shared>();
                         let _ = app2.opener().open_url(shared.login_url(), None::<String>);
-                        if let Some(w) = app2.get_webview_window("main") {
+                        if let Some(w) = app2.get_webview_window(&window_label) {
                             let _ = w.eval(format!(
                                 "window.location.replace('{}')",
                                 shared.waiting_url()
@@ -876,7 +941,7 @@ fn build_window(app: &tauri::AppHandle, url: &str) -> tauri::Result<()> {
                 }
                 // 服务设置页动作同样走导航哨兵，避免依赖远程源下不稳定的 Tauri IPC。
                 if path == "/__desktop/connect-server" {
-                    open_server_config(&app_for_nav);
+                    open_server_config_in(&app_for_nav, &window_label);
                     return false;
                 }
                 if path == "/__desktop/save-server" {
@@ -907,7 +972,7 @@ fn build_window(app: &tauri::AppHandle, url: &str) -> tauri::Result<()> {
                         .query_pairs()
                         .find_map(|(key, value)| (key == "action").then(|| value.into_owned()))
                         .unwrap_or_default();
-                    if let Some(window) = app_for_nav.get_webview_window("main") {
+                    if let Some(window) = app_for_nav.get_webview_window(&window_label) {
                         match action.as_str() {
                             "minimize" => {
                                 let _ = window.minimize();
@@ -945,8 +1010,9 @@ fn build_window(app: &tauri::AppHandle, url: &str) -> tauri::Result<()> {
                         .find_map(|(key, value)| (key == "action").then(|| value.into_owned()))
                         .unwrap_or_default();
                     let app = app_for_nav.clone();
+                    let window_label = window_label.clone();
                     let _ = app_for_nav.run_on_main_thread(move || {
-                        menu::dispatch(&app, &action);
+                        menu::dispatch_for_window(&app, &action, &window_label);
                     });
                     return false;
                 }
@@ -981,12 +1047,13 @@ fn build_window(app: &tauri::AppHandle, url: &str) -> tauri::Result<()> {
                 // 双模式下切到云端：复用初始化时记住的云端地址，不再弹「选服务器」页。
                 if path == "/__desktop/activate-cloud" {
                     let app2 = app_for_nav.clone();
+                    let window_label = window_label.clone();
                     tauri::async_runtime::spawn(async move {
                         let dir = app2.state::<Shared>().config_dir.clone();
                         let base = config::load(&dir).cloud_base();
                         if base.trim().is_empty() {
                             // 没有记住的地址（异常态）：退回到「设置服务器地址」页手动填。
-                            open_server_config(&app2);
+                            open_server_config_in(&app2, &window_label);
                             return;
                         }
                         if let Err(error) = config::save_server_base(&dir, &base) {
@@ -1002,6 +1069,7 @@ fn build_window(app: &tauri::AppHandle, url: &str) -> tauri::Result<()> {
                 // 直接切到安装进度页——不重启桌面进程，窗口不会先消失再重开。
                 if brand::HYBRID_ONLY && path == "/__desktop/provision" {
                     let app2 = app_for_nav.clone();
+                    let window_label = window_label.clone();
                     tauri::async_runtime::spawn(async move {
                         let dir = app2.state::<Shared>().config_dir.clone();
                         if let Err(error) = config::provision(
@@ -1023,7 +1091,7 @@ fn build_window(app: &tauri::AppHandle, url: &str) -> tauri::Result<()> {
                                     return;
                                 }
                             };
-                        if let Some(window) = app2.get_webview_window("main") {
+                        if let Some(window) = app2.get_webview_window(&window_label) {
                             if let Err(error) = window.navigate(setup_url) {
                                 eprintln!("[config] 打开初始化进度页失败: {error}");
                             }
@@ -1084,13 +1152,14 @@ fn build_window(app: &tauri::AppHandle, url: &str) -> tauri::Result<()> {
                 // 调 POST /v1/projects kind=local 建项目。走导航哨兵，不依赖 Tauri IPC。
                 if path == "/__desktop/pick-local-folder" {
                     let app2 = app_for_nav.clone();
+                    let window_label = window_label.clone();
                     app_for_nav.dialog().file().pick_folder(move |picked| {
                         let Some(folder) = picked else { return };
                         let path_str = match folder.into_path() {
                             Ok(p) => p.to_string_lossy().to_string(),
                             Err(_) => return,
                         };
-                        if let Some(win) = app2.get_webview_window("main") {
+                        if let Some(win) = app2.get_webview_window(&window_label) {
                             let esc = path_str.replace('\\', "\\\\").replace('\'', "\\'");
                             let _ = win.eval(&format!(
                                 "window.dispatchEvent(new CustomEvent('hugagent:local-folder',{{detail:'{esc}'}}));"
@@ -1102,13 +1171,14 @@ fn build_window(app: &tauri::AppHandle, url: &str) -> tauri::Result<()> {
                 // 授权一个本地目录（ticket #06）：原生选目录 → 回抛给前端登记 grant。
                 if path == "/__desktop/pick-grant-folder" {
                     let app2 = app_for_nav.clone();
+                    let window_label = window_label.clone();
                     app_for_nav.dialog().file().pick_folder(move |picked| {
                         let Some(folder) = picked else { return };
                         let path_str = match folder.into_path() {
                             Ok(p) => p.to_string_lossy().to_string(),
                             Err(_) => return,
                         };
-                        if let Some(win) = app2.get_webview_window("main") {
+                        if let Some(win) = app2.get_webview_window(&window_label) {
                             let esc = path_str.replace('\\', "\\\\").replace('\'', "\\'");
                             let _ = win.eval(&format!(
                                 "window.dispatchEvent(new CustomEvent('hugagent:grant-folder',{{detail:'{esc}'}}));"
@@ -1134,12 +1204,7 @@ fn build_window(app: &tauri::AppHandle, url: &str) -> tauri::Result<()> {
                 let shared = app2.state::<Shared>();
                 let expected = clear_desktop_session(&shared).await;
                 if !shared.session_epoch.matches(expected) { return; }
-                if let Some(w) = app2.get_webview_window("main") {
-                    let _ = w.eval(format!(
-                        "window.location.replace('{}')",
-                        shared.login_idle_url()
-                    ));
-                }
+                navigate_session_windows(&app2, &shared.login_idle_url());
             });
             false
         })
@@ -1150,13 +1215,16 @@ fn build_window(app: &tauri::AppHandle, url: &str) -> tauri::Result<()> {
     // macOS application menus belong in the system menu bar. Windows/Linux use
     // the in-window menu injected by proxy.rs to avoid a second chrome row.
     #[cfg(target_os = "macos")]
-    match menu::build(app) {
-        Ok(menu) => {
-            if let Err(error) = window.set_menu(menu) {
-                eprintln!("[menu] 挂载 macOS 原生菜单失败: {error}");
+    if label == "main" {
+        match menu::build(app) {
+            Ok(menu) => {
+                // macOS menus are app-wide; per-window set_menu is unsupported.
+                if let Err(error) = app.set_menu(menu) {
+                    eprintln!("[menu] 挂载 macOS 原生菜单失败: {error}");
+                }
             }
+            Err(error) => eprintln!("[menu] 构建 macOS 原生菜单失败: {error}"),
         }
-        Err(error) => eprintln!("[menu] 构建 macOS 原生菜单失败: {error}"),
     }
 
     Ok(())
@@ -1222,9 +1290,7 @@ fn handle_deep_link(app: &tauri::AppHandle, raw_url: String) {
                     );
                 }
                 let home = shared.home_url();
-                if let Some(w) = app.get_webview_window("main") {
-                    let _ = w.eval(format!("window.location.replace('{}')", home));
-                }
+                navigate_session_windows(&app, &home);
                 show_main_window(&app);
             }
             Err(e) => {
@@ -1301,5 +1367,18 @@ mod display_tests {
             adaptive_window_dimensions(3840, 2160, 2.0),
             (1280.0, 860.0, 960.0, 640.0)
         );
+    }
+}
+
+#[cfg(test)]
+mod multiwindow_tests {
+    #[test]
+    fn regular_window_labels_exclude_dialogs_and_quick_ask() {
+        for label in ["main", "main-1", "main-42"] {
+            assert!(super::is_desktop_window(label), "{label}");
+        }
+        for label in ["quickask", "close-confirm", "main-", "main-dialog", "other"] {
+            assert!(!super::is_desktop_window(label), "{label}");
+        }
     }
 }
