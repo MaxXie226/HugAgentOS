@@ -141,11 +141,19 @@ jobs:
           if (!$mt) { throw "Windows SDK Manifest Tool is required" }
           & $mt.FullName -manifest $manifest "-outputresource:$($executables[0]);#1"
           if ($LASTEXITCODE -ne 0) { throw "Test manifest embedding failed" }
+          # Execute this exact patched harness. A second cargo invocation may
+          # relink it and discard the Common Controls application manifest.
+          & $executables[0]
+          if ($LASTEXITCODE -ne 0) { throw "Windows Rust tests failed" }
+          & $executables[0] generated_payload_installs_and_serves_health_endpoint --ignored --nocapture
+          if ($LASTEXITCODE -ne 0) { throw "Windows offline cold start failed" }
 
       - name: Run desktop Rust tests
+        if: runner.os != 'Windows'
         run: cargo test --manifest-path desktop/src-tauri/Cargo.toml --lib
 
       - name: Exercise the real offline install and health endpoint
+        if: runner.os != 'Windows'
         run: >-
           cargo test --manifest-path desktop/src-tauri/Cargo.toml
           generated_payload_installs_and_serves_health_endpoint
