@@ -25,6 +25,8 @@ import {
   uploadFile,
 } from '../api';
 import { t } from '../i18n';
+import { navigateTo, pathForPanel, subsFromPath } from '../routing/navigation';
+import { mySpaceTabFromSubs } from '../routing/subPages';
 import { ROOT_FOLDER_SENTINEL } from '../utils/constants';
 import { childrenOfFolder, findFolderById } from '../utils/folderTree';
 import { useAutomationChatStore } from './automationChatStore';
@@ -36,15 +38,7 @@ type PersonalScope = { kind: 'personal'; folderId: string | null };
 const PAGE_SIZE = 20;
 const AUTOMATION_FAVORITE_CHAT_PREFIX = 'automation:';
 const AUTOMATION_FAVORITE_ITEM_PREFIX = 'favorite-automation:';
-const MY_SPACE_TAB_STORAGE_KEY = 'hugagent_my_space_active_tab';
 const MY_SPACE_RAIL_STORAGE_KEY = 'hugagent_my_space_rail_collapsed';
-const VALID_MY_SPACE_TABS: readonly MySpaceTab[] = [
-  'assets',
-  'kb',
-  'favorites',
-  'shares',
-  'notifications',
-];
 
 function loadRailCollapsed(): boolean {
   if (typeof window === 'undefined') return false;
@@ -55,26 +49,9 @@ function loadRailCollapsed(): boolean {
   }
 }
 
-function loadActiveMySpaceTab(): MySpaceTab {
-  if (typeof window === 'undefined') return 'assets';
-  try {
-    const saved = window.localStorage.getItem(MY_SPACE_TAB_STORAGE_KEY);
-    if (saved && (VALID_MY_SPACE_TABS as readonly string[]).includes(saved)) {
-      return saved as MySpaceTab;
-    }
-  } catch {
-    // localStorage unavailable
-  }
-  return 'assets';
-}
-
-function saveActiveMySpaceTab(tab: MySpaceTab): void {
-  if (typeof window === 'undefined') return;
-  try {
-    window.localStorage.setItem(MY_SPACE_TAB_STORAGE_KEY, tab);
-  } catch {
-    // localStorage unavailable
-  }
+/** 打开页面时当前是哪个模块，由地址说了算。 */
+function activeMySpaceTab(): MySpaceTab {
+  return mySpaceTabFromSubs(subsFromPath());
 }
 
 function isAutomationFavoriteChatId(chatId: string): boolean {
@@ -186,7 +163,10 @@ interface MySpaceState {
   notifLoading: boolean;
   notifUnreadCount: number;
   notifSelectedIds: Set<string>;
-  setTab: (tab: MySpaceTab) => void;
+  /** `sub` 是该模块内的下级页（知识库的公共 / 私有），要随这一次跳转一起给出。 */
+  setTab: (tab: MySpaceTab, sub?: string) => void;
+  /** 地址已经是目标模块时（直接打开链接、前进后退）只把数据切过去，不再跳一次。 */
+  syncTab: (tab: MySpaceTab) => void;
   setSearchKeyword: (keyword: string) => void;
   setGlobalQuery: (query: string) => void;
   openSearch: () => void;
@@ -225,7 +205,7 @@ export const useMySpaceStore = create<MySpaceState>((set, get) => ({
   resources: [],
   favorites: [],
   loading: false,
-  tab: loadActiveMySpaceTab(),
+  tab: activeMySpaceTab(),
   searchKeyword: '',
   railCollapsed: loadRailCollapsed(),
   searchOpen: false,
@@ -247,9 +227,13 @@ export const useMySpaceStore = create<MySpaceState>((set, get) => ({
   notifUnreadCount: 0,
   notifSelectedIds: new Set<string>(),
 
-  setTab: (tab) => {
+  setTab: (tab, sub) => {
+    navigateTo(pathForPanel('my_space', tab, sub));
+    get().syncTab(tab);
+  },
+
+  syncTab: (tab) => {
     const previous = get().tab;
-    saveActiveMySpaceTab(tab);
     set({ tab, page: 1, favPage: 1, resources: [], favorites: [], hasMore: false, favHasMore: false });
     if (previous === 'notifications' && tab !== 'notifications') {
       set({ notifSelectedIds: new Set<string>() });
