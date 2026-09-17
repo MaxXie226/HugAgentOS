@@ -7,18 +7,22 @@ with the version that originally created it.
 
 from __future__ import annotations
 
+import logging
 from contextlib import contextmanager
 from typing import Any, Iterator, Mapping, Optional, Tuple
 
 from sqlalchemy import Column, MetaData, inspect
 from sqlalchemy.engine import Connection, Engine
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.schema import CreateColumn
+
+logger = logging.getLogger(__name__)
 
 SchemaItem = Tuple[str, str]
 
 
 @contextmanager
-def _connection(bind: Engine | Connection) -> Iterator[Connection]:
+def connection_scope(bind: Engine | Connection) -> Iterator[Connection]:
     if isinstance(bind, Connection):
         yield bind
         return
@@ -73,9 +77,15 @@ def reconcile_metadata_schema(
     """
 
     defaults = dict(bootstrap_server_defaults or {})
-    report: dict[str, list[str]] = {"tables": [], "columns": [], "indexes": [], "constraints": []}
+    report: dict[str, list[str]] = {
+        "tables": [],
+        "columns": [],
+        "indexes": [],
+        "constraints": [],
+        "skipped_indexes": [],
+    }
 
-    with _connection(bind) as connection:
+    with connection_scope(bind) as connection:
         before_tables = set(inspect(connection).get_table_names())
         metadata.create_all(bind=connection, checkfirst=True)
         after_tables = set(inspect(connection).get_table_names())
@@ -125,7 +135,16 @@ def reconcile_metadata_schema(
             for index in sorted(table.indexes, key=lambda item: item.name or ""):
                 if not index.name or index.name in existing_indexes:
                     continue
-                index.create(bind=connection, checkfirst=True)
+                # 建不上就跳过，别拖垮启动：这是一个自愈式的调和器，存量数据可能还
+                # 违反某条后加的约束（历史上没有它才写进去的重复行）。跳过的索引记进
+                # report["skipped_indexes"]，调用方看得见，数据修干净后下次启动补上。
+                try:
+                    with connection.begin_nested():
+                        index.create(bind=connection, checkfirst=True)
+                except SQLAlchemyError as error:
+                    logger.error("Skipping index %s: %s", index.name, error)
+                    report["skipped_indexes"].append(index.name)
+                    continue
                 report["indexes"].append(index.name)
 
     for values in report.values():

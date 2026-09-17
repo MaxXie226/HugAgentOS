@@ -18,6 +18,7 @@ from core.db.models import (
     UserShadow,
 )
 from sqlalchemy import and_, desc, func, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 
@@ -32,8 +33,18 @@ class UserRepository:
         return self.db.query(UserShadow).filter(UserShadow.user_id == user_id).first()
 
     def get_by_user_center_id(self, user_center_id: str) -> Optional[UserShadow]:
-        """Get user by user center ID."""
-        return self.db.query(UserShadow).filter(UserShadow.user_center_id == user_center_id).first()
+        """Get user by user center ID.
+
+        排序是刻意的。唯一约束是后加的，早期库里同一个身份可能残留多行；不指定排序时
+        取哪一行由执行计划决定（Postgres 尤其没有保证），同一个人换个时刻就可能被认到
+        另一行，会话和生成物跟着"消失"。固定取最早建的那一行——去重合并保留的也是它。
+        """
+        return (
+            self.db.query(UserShadow)
+            .filter(UserShadow.user_center_id == user_center_id)
+            .order_by(UserShadow.created_at.asc(), UserShadow.user_id.asc())
+            .first()
+        )
 
     def create(self, user_data: Dict[str, Any]) -> UserShadow:
         """Create a new user shadow."""
@@ -42,6 +53,23 @@ class UserRepository:
         self.db.commit()
         self.db.refresh(user)
         return user
+
+    def create_or_reuse_by_user_center_id(self, user_data: Dict[str, Any]) -> UserShadow:
+        """Create a shadow, or return the row a concurrent request just created.
+
+        "先查后建"在并发下不成立：桌面壳登录后一次性打出的那批桥接请求会同时查不到、
+        同时插入。``users_shadow.user_center_id`` 上的唯一索引让其中只有一个能成功，
+        其余的在这里改成复用赢家那一行——每个建号入口都该走这个口子，而不是各自记得
+        处理冲突。
+        """
+        try:
+            return self.create(user_data)
+        except IntegrityError:
+            self.db.rollback()
+            existing = self.get_by_user_center_id(user_data["user_center_id"])
+            if existing is None:
+                raise
+            return existing
 
     def update(self, user_id: str, update_data: Dict[str, Any]) -> Optional[UserShadow]:
         """Update user information."""

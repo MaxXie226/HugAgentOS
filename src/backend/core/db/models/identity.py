@@ -17,6 +17,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import INET, JSONB
 from sqlalchemy.orm import mapped_column, relationship
@@ -54,6 +55,17 @@ class UserShadow(Base):
     __table_args__ = (
         Index("idx_users_shadow_user_center_id", "user_center_id"),
         Index("idx_users_shadow_updated_at", "updated_at"),
+        # 一个用户中心身份最多一行影子用户。缺了这条约束，"先查后建"在并发下会各建
+        # 一行：桌面壳登录后一次性打出的多个桥接请求就足以造出重复身份，而会话、生成物
+        # 等全部挂在 user_id 上——之后认到哪一行，就只看得见挂在那一行下的数据。
+        # 局部索引：user_center_id 为空表示这行还没有绑定用户中心身份，彼此不冲突。
+        Index(
+            "uq_users_shadow_user_center_id",
+            "user_center_id",
+            unique=True,
+            sqlite_where=text("user_center_id IS NOT NULL AND user_center_id <> ''"),
+            postgresql_where=text("user_center_id IS NOT NULL AND user_center_id <> ''"),
+        ),
     )
 
 

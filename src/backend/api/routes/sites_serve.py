@@ -17,9 +17,11 @@ Security:
 - private / team sites are visible only to the site owner / team members
   (session-cookie check) and get no sandbox (otherwise sub-resource requests
   without cookies would all 403).
-- 设了访问密码的站点，静态内容在解锁前一律返回统一验证页。两道闸都由
-  ``_load_authorized_site`` 统一把守，密码闸默认开着；``require_unlock=False`` 是
-  写在各个 ``__api/*`` 处理器上的显式豁免（理由见该函数的 docstring）。
+- 设了访问密码的站点，静态内容在解锁前一律返回统一验证页，且不套 sandbox——
+  否则文档落在不透明源上，子资源请求带不上解锁 cookie，会全部 401（见
+  ``_sandboxed``）。两道闸都由 ``_load_authorized_site`` 统一把守，密码闸默认开着；
+  ``require_unlock=False`` 是写在各个 ``__api/*`` 处理器上的显式豁免（理由见该函数的
+  docstring）。
 - Site API write operations have in-process rate limiting (per ip+slug) and
   quotas (service layer).
 """
@@ -117,6 +119,16 @@ def _client_ip(request: Request) -> str:
         # 退一步取最后一段——那是最靠近本服务的一跳填的。
         return fwd.split(",")[-1].strip()[:45]
     return (request.client.host if request.client else "")[:45]
+
+
+def _sandboxed(site) -> bool:
+    """站点内容是否套 sandbox CSP。
+
+    沙箱把文档放到不透明源上，浏览器随之把它的子资源请求当跨站处理、一律不带
+    SameSite cookie——设了访问密码的站点因此取不到解锁凭据，脚本样式会全部 401。
+    所以密码闸和沙箱只能二选一，与 private / team 站点不套沙箱是同一个理由。
+    """
+    return site.visibility == "public" and not site.access_password_hash
 
 
 def _common_headers(content_type: str, *, sandbox: bool, cache: Optional[str] = None) -> dict:
@@ -341,5 +353,5 @@ def _site_file_response(db: Session, site, path: str) -> Response:
     return Response(
         content=content,
         media_type=content_type,
-        headers=_common_headers(content_type, sandbox=site.visibility == "public"),
+        headers=_common_headers(content_type, sandbox=_sandboxed(site)),
     )
