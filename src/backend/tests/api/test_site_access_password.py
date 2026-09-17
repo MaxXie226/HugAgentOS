@@ -232,3 +232,28 @@ def test_site_without_password_is_untouched(svc, owner, client):
     assert response.status_code == 200
     assert "secret" in response.text
     assert "sandbox" in response.headers.get("Content-Security-Policy", "")
+
+
+def test_unlocked_site_drops_the_sandbox_so_assets_keep_the_cookie(svc, owner, client):
+    """沙箱把文档放到不透明源上，浏览器就不再给它的子资源带 SameSite cookie——
+    密码站点若还套 sandbox，解锁后脚本样式会全部 401、页面白屏。
+    """
+    site = svc.set_access_password(
+        _site(svc, owner).site_id, owner.user_id, "open-sesame"
+    )
+    unlocked = client.post(
+        f"/site/{site.slug}/__api/access", json={"password": "open-sesame"}
+    )
+    assert unlocked.status_code == 200
+
+    page = client.get(f"/site/{site.slug}/")
+    assert page.status_code == 200
+    assert "Content-Security-Policy" not in page.headers
+    asset = client.get(f"/site/{site.slug}/app.js", headers={"sec-fetch-dest": "script"})
+    assert asset.status_code == 200
+    assert "Content-Security-Policy" not in asset.headers
+
+    svc.clear_access_password(site.site_id, owner.user_id)
+    assert "sandbox" in client.get(f"/site/{site.slug}/").headers.get(
+        "Content-Security-Policy", ""
+    )

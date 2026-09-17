@@ -73,7 +73,11 @@ class UserService:
                 "avatar_url": avatar_url,
                 "last_sync_at": datetime.utcnow(),
             }
-            user = self.repo.create(user_data)
+            # 并发下会有几个请求同时走到这里，各自查不到、各自插入——复用先到的那一行
+            # 而不是再建一行（见 UserRepository.create_or_reuse_by_user_center_id）。
+            user = self.repo.create_or_reuse_by_user_center_id(user_data)
+            if user.user_id != user_data["user_id"]:
+                return user
 
             # Audit log
             self.audit_repo.create(

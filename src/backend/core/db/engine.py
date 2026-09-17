@@ -121,12 +121,32 @@ def get_db() -> Generator[Session, None, None]:
         db.close()
 
 
+def _merge_duplicate_identities() -> None:
+    """合并历史遗留的重复影子用户。
+
+    桌面本机库没有 alembic，数据修复只能挂在启动上；必须跑在调和器建索引之前，因为
+    ``users_shadow.user_center_id`` 的唯一索引在库里还有重复行时建不起来。装了唯一
+    索引之后就直接返回，稳态下不再扫表。这一步永远不能拦住启动——合并失败就带着重复
+    继续跑，索引随后也会被跳过，下次启动再试。
+    """
+    try:
+        from core.db.identity_dedup import merge_duplicate_user_shadows
+
+        report = merge_duplicate_user_shadows(engine)
+        if report.get("groups"):
+            logger.warning("Duplicate user shadows merged: %s", report)
+    except Exception as error:  # noqa: BLE001 - 启动路径，任何失败都只记录
+        logger.error("Duplicate user shadow merge failed, leaving rows untouched: %s", error)
+
+
 def init_db():
     """Initialize or reconcile the database schema for the active edition."""
     if settings.edition.edition == "ce":
         if settings.deploy.is_local:
             from core.db.local_schema_upgrade import reconcile_local_chat_sequences
 
+            # 本机库的数据修复都在这里，且都排在下面的 schema 调和之前。
+            _merge_duplicate_identities()
             local_report = reconcile_local_chat_sequences(engine)
             if any(local_report.values()):
                 logger.info("Local database compatibility schema reconciled: %s", local_report)
