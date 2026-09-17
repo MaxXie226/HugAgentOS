@@ -70,11 +70,6 @@ def normalize_approval_mode(raw: Any) -> str:
     return _LEGACY_APPROVAL_ALIASES.get(mode, APPROVAL_ASK)
 
 
-CURRENT_APPROVAL_MODE: ContextVar[str] = ContextVar(
-    "jx_current_approval_mode", default=APPROVAL_ASK
-)
-
-
 def resolve_approval_mode(explicit: Any, *, user_id: Optional[str]) -> str:
     """本次运行的权限档：调用方显式给了就用它，否则回落到用户自己存的那一档。
 
@@ -104,15 +99,21 @@ def _preset_answers(mode: str, *, dangerous: bool) -> bool:
     return mode == APPROVAL_AUTO and not dangerous
 
 
-def preset_answers_confirmation(*, op: str = "", dangerous: bool = False) -> bool:
-    """执行期复查：当前权限档是否已经替用户答了这次确认。
+def preset_answers_for_user(
+    user_id: Optional[str], *, op: str = "", dangerous: bool = False
+) -> bool:
+    """执行期复查：这个用户的权限档是不是已经替他答了这次确认。
 
-    留给工具在 dispatch 之后**自己发起**的确认（bash 把沙盒改动回写「我的
-    空间」就是这一类）：它不经过 ``on_acting``，拿不到 ``PermissionRuntime``，
-    但判定必须和这里同源，不能各写一份。
+    留给在 dispatch 之外**自己发起**确认的地方（「我的空间」的登记器就是这一类）：
+    它们不经过 ``on_acting``，拿不到 ``PermissionRuntime``，但判定必须和这里同源。
+
+    按 ``user_id`` 取档而不是读异步上下文：登记器跑在自己的任务里，任何 ContextVar
+    在那里读到的都是默认值 —— 用户明明选了「完全放开」，还会逐个文件弹确认。档位的
+    真源本来就是用户设置。
     """
     return _preset_answers(
-        CURRENT_APPROVAL_MODE.get(), dangerous=dangerous or op in DESTRUCTIVE_OPS
+        resolve_approval_mode(None, user_id=user_id),
+        dangerous=dangerous or op in DESTRUCTIVE_OPS,
     )
 
 
@@ -1055,14 +1056,8 @@ class ToolPermissionMiddleware(MiddlewareBase):
         self.service = service
 
     async def on_acting(self, agent: Agent, input_kwargs: dict, next_handler):  # noqa: ANN001
-        # 权限档绑到执行期上下文：工具体内自己发起的确认（bash 回写「我的空间」）
-        # 不经过这里的判定，但必须看到同一档位。
-        mode_token = CURRENT_APPROVAL_MODE.set(self.service.runtime.approval_mode)
-        try:
-            async for item in self._act(input_kwargs, next_handler):
-                yield item
-        finally:
-            CURRENT_APPROVAL_MODE.reset(mode_token)
+        async for item in self._act(input_kwargs, next_handler):
+            yield item
 
     async def _act(self, input_kwargs: dict, next_handler):  # noqa: ANN001
         tool_call = input_kwargs.get("tool_call")
@@ -1099,7 +1094,6 @@ class ToolPermissionMiddleware(MiddlewareBase):
 
 
 __all__ = [
-    "CURRENT_APPROVAL_MODE",
     "CURRENT_PERMISSION_TICKET",
     "FAIL_CLOSED_MODE",
     "FALLBACK_ALLOW",
@@ -1124,7 +1118,7 @@ __all__ = [
     "local_command_tool",
     "local_path_tool",
     "mcp_tool_permission",
-    "preset_answers_confirmation",
+    "preset_answers_for_user",
     "register_mcp_client_permissions",
     "require_local_path_permission",
     "resolve_approval_mode",

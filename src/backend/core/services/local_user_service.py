@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9_]{2,32}$")
@@ -378,8 +379,17 @@ class LocalUserService:
             extra_data={"auth_source": source, "external_id": external_id},
             last_sync_at=datetime.utcnow(),
         )
-        self.db.add(shadow)
-        self.db.flush()
+        try:
+            with self.db.begin_nested():
+                self.db.add(shadow)
+                self.db.flush()
+        except IntegrityError:
+            # 并发下另一个请求刚为同一个外部身份建好影子用户（users_shadow.user_center_id
+            # 唯一）——复用它，不再建第二个账号。
+            existing = self.user_repo.get_by_user_center_id(external_id)
+            if existing is None:
+                raise
+            return existing, False
 
         self.local_repo.create(
             {

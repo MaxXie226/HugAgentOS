@@ -5,7 +5,7 @@ import {
   createLoop, startLoop, resumeLoop, getLoop, steerLoop, cancelLoop, getSession,
 } from '../src/api';
 import { useChatStore } from '../src/stores/chatStore';
-import { saveActiveProjectId } from '../src/stores/projectSession';
+import { setActiveProjectReader } from '../src/stores/projectSession';
 import { flushChatStore, loadChatStore, registerDraftChatId } from '../src/storage';
 
 const requests: Array<{ url: string; init?: RequestInit }> = [];
@@ -92,7 +92,8 @@ const storage = {
   removeItem: (key: string) => { memory.delete(key); },
 };
 (globalThis as any).localStorage = storage;
-(globalThis as any).window = { localStorage: storage, sessionStorage: storage, setTimeout, clearTimeout };
+// location：会话地址现在是「当前开着哪段会话」的真源，store 会读它
+(globalThis as any).window = { localStorage: storage, sessionStorage: storage, setTimeout, clearTimeout, location: { pathname: '/', search: '' } };
 setHybridDual(true);
 useChatStore.setState({ currentUserId: 'default-target-test' });
 useChatStore.getState().newChat();
@@ -112,10 +113,11 @@ assert.deepEqual(chatTargetHeaders(oldCloud.id), {}, 'old cloud history with unl
 registerDraftChatId('default-target-test', 'evicted-cloud');
 useChatStore.getState().setCurrentChatId('evicted-cloud');
 assert.deepEqual(chatTargetHeaders('evicted-cloud'), {}, 'evicted old cloud history stays cloud');
-saveActiveProjectId('cloud-project');
+let activeProject: string | null = 'cloud-project';
+setActiveProjectReader(() => activeProject);
 useChatStore.getState().newChat();
 assert.deepEqual(chatTargetHeaders(useChatStore.getState().currentChatId), {}, 'active cloud project overrides local default');
-saveActiveProjectId(null);
+activeProject = null;
 useChatStore.getState().newChat();
 const nextDraft = useChatStore.getState().currentChatId;
 assert.equal(chatTargetHeaders(nextDraft)['x-hugagent-target'], 'local');

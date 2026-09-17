@@ -12,7 +12,7 @@ from core.db.engine import get_db
 from core.infra.responses import success_response, created_response
 from core.services import automation_notifications as notifications
 from core.services.automation_service import AutomationService, SUMMARY_LIMIT_LIST
-from core.infra.logging import get_logger
+from core.infra.logging import get_logger, quiet_access_log
 
 logger = get_logger(__name__)
 
@@ -334,6 +334,7 @@ def get_automation_runs(
 
 
 @router.get("/notifications/list", summary="获取自动化通知列表")
+@quiet_access_log
 async def get_notifications(
     user: UserContext = Depends(get_current_user),
 ):

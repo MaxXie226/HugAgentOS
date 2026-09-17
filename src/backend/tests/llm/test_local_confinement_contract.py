@@ -75,7 +75,7 @@ def test_a_missing_backend_refuses_the_command(mode, tmp_path):
 
 
 def test_a_policy_the_platform_cannot_enforce_refuses_too(tmp_path):
-    reason = "Windows 受限令牌沙箱无法限制读取范围，已拒绝执行"
+    reason = "Windows 低完整性沙箱无法限制读取范围，已拒绝执行"
     with patch(_CONFINE, side_effect=SandboxUnenforceableError(reason)):
         with pytest.raises(LocalConfinementUnavailableError) as excinfo:
             _authorization(APPROVAL_ASK, str(tmp_path)).confine()

@@ -1,10 +1,10 @@
 """Explicit desktop selections use the same authorized sources as runtime views."""
 
 from . import connectors, plugins, registry, skills
-from .errors import NameConflict, PackageMissing
+from .errors import NameConflict
 
 
-def cloud_plugin_selection(ident, *, user_id, allow_unavailable=False):
+def cloud_plugin_selection(ident, *, user_id):
     if not skills.account_authorized_for(user_id):
         return None
     profile = skills.current_account_profile()
@@ -27,18 +27,17 @@ def cloud_plugin_selection(ident, *, user_id, allow_unavailable=False):
         try:
             ensure_cloud_ready(user_id, install_ids=[row.install_id])
         except (CapabilityError, OSError, ValueError):
-            if not allow_unavailable:
-                raise
+            pass
         row = registry.get(row.install_id) or row
     if not row.enabled or not row.ready:
-        if allow_unavailable:
-            return {
-                "install_id": row.install_id,
-                "name": row.display_name or row.key,
-                "skills": [],
-                "mcp": [],
-            }
-        raise PackageMissing("selected plugin is not ready", ref=row.install_id)
+        # 选中的插件还没就绪：如实返回一个没有组件的它，让调用方照常说明，
+        # 而不是把整轮打断。
+        return {
+            "install_id": row.install_id,
+            "name": row.display_name or row.key,
+            "skills": [],
+            "mcp": [],
+        }
     from .preparation import ensure_cloud_ready as _ensure_components
 
     from .errors import CapabilityError
@@ -47,8 +46,6 @@ def cloud_plugin_selection(ident, *, user_id, allow_unavailable=False):
         _ensure_components(user_id, install_ids=[row.install_id])
         skill_ids, mcp_ids = plugins.cloud_binding_ids([row.install_id], user_id=user_id)
     except (CapabilityError, OSError, ValueError):
-        if not allow_unavailable:
-            raise
         skill_ids, mcp_ids = [], []
     return {
         "install_id": row.install_id,

@@ -1,5 +1,6 @@
 """Tests for the per-run workspace state used by pin_to_workspace."""
 import asyncio
+import contextvars
 
 from core.llm import workspace
 
@@ -148,3 +149,19 @@ def test_state_isolated_per_async_context():
     a, b = asyncio.run(run())
     assert a == ["fa"]
     assert b == ["fb"]
+
+
+def test_a_pin_from_outside_the_run_context_lands_nowhere():
+    """产物区只能由这一轮上下文里的 ``pin_to_workspace`` 填。
+
+    回归的是这条真实故障：登记器在自己的任务里按 chat_id 反查工作区状态，把文件卡片挂了
+    进去。「我的空间」是用户级的一份目录、每个会话的沙箱都挂着它，登记器只看得到路径、
+    看不到会话，于是会话 B 的沙箱写的 csv 被挂进了会话 A 的产物区。现在没有这条按会话
+    反查的入口：不在这一轮的上下文里就挂不上，也不该挂。
+    """
+    workspace.init_state()
+    assert not hasattr(workspace, "pin_for_chat")  # 按会话反查的后门不该再存在
+
+    # 一份空的 ContextVar 上下文 = 登记器那种"不属于任何一轮"的执行环境。
+    assert contextvars.Context().run(workspace.pin, "f9") is False
+    assert workspace.get_pinned_file_ids() == []

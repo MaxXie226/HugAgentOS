@@ -1,7 +1,13 @@
 """Non-blocking memory I/O integration layer outside the SSE main path.
 
+- `open_session_memory()` / `resolve_session_memory()` own the chat-scoped
+  lifecycle: the frozen block is assembled on the first turn and replayed from
+  the stored snapshot afterwards, with no retrieval on later turns
+- `inject_session_blocks()` prepends the session-constant blocks (identity, frozen
+  memory) as user-role messages; they stay out of the system prompt so the prompt,
+  tool schemas and skill list remain a shared prefix
 - `launch_memory_retrieval()` starts the Fact retrieval task in the background with a budget timeout
-- `build_frozen_memory_block()` assembles the Profile + Fact frozen block once at session start
+- `build_frozen_memory_block()` assembles the Profile + Fact frozen block
 - `save_memories_background()` delegates writes to the bounded post-response pipeline in
   `core.memory.pipeline` (extractors → sanitize → write L1/L2/Session + audit)
 """
@@ -11,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import weakref
+from dataclasses import dataclass, replace
 from time import monotonic
 from typing import Any, Dict, List, Optional
 
@@ -19,6 +26,11 @@ from core.memory import profile
 from core.memory.context import MemoryContext
 from core.memory.retrieval_types import MemoryRetrievalResult
 from core.memory.service import retrieve_memories_structured
+from core.memory.session_snapshot import (
+    SessionMemorySnapshot,
+    load_session_memory_snapshot,
+    save_session_memory_snapshot,
+)
 from core.llm.context_ir import (
     KIND_IDENTITY,
     KIND_MEMORY,
@@ -145,13 +157,26 @@ def get_last_retrieval(task: Optional[asyncio.Task]) -> Optional[MemoryRetrieval
         return None
 
 
+@dataclass(frozen=True)
+class FrozenMemoryBlock:
+    """An assembled frozen block plus whether the read behind it actually landed.
+
+    ``settled`` is false when the L2 read timed out or came back degraded. Such
+    a block is missing facts for reasons that say nothing about what the user's
+    memory holds, so it must not be frozen for the remainder of the session.
+    """
+
+    text: str
+    settled: bool
+
+
 async def build_frozen_memory_block(
     user_id: str,
     workspace_id: str,
     memory_task: Optional[asyncio.Task],
     *,
     memory_enabled: bool = True,
-) -> str:
+) -> FrozenMemoryBlock:
     """Assemble the "session-frozen" block = L1 Profile markdown + L2 Fact top-K.
 
     - When `memory_enabled=False`, return empty immediately (**do not load unless the user
@@ -161,10 +186,11 @@ async def build_frozen_memory_block(
     - Fact takes the result from the already-started memory_task; if the task hasn't finished,
       wait briefly; if still unfinished, give up on Fact injection for this round (never block agent startup)
 
-    Returns the assembled text; empty string when there is nothing.
+    Called once per chat by `resolve_session_memory()`; later turns replay the
+    stored snapshot instead of reassembling.
     """
     if not memory_enabled:
-        return ""
+        return FrozenMemoryBlock(text="", settled=False)
 
     # Profile layer (L1)
     profile_md = ""
@@ -176,10 +202,13 @@ async def build_frozen_memory_block(
                 "[memory] profile fetch failed user=%s ws=%s: %s", user_id, workspace_id, exc
             )
 
-    # Fact layer (L2)
+    # Fact layer (L2). With no retrieval task there is no L2 read to wait for,
+    # so a Profile-only block is already the complete answer for this session.
     fact_text = ""
+    fact_settled = True
     fact_result: Optional[MemoryRetrievalResult] = None
     if memory_task is not None:
+        fact_settled = False
         try:
             # Wait up to retrieval_budget_ms (default 600ms), then give up; memory_task was
             # started before the agent was created, so in most cases it is nearly done by now.
@@ -192,6 +221,9 @@ async def build_frozen_memory_block(
                 await asyncio.wait_for(asyncio.shield(memory_task), timeout=wait_budget_s)
             )
             fact_text = fact_result.to_text() if fact_result is not None else ""
+            # A degraded result means the store was unreachable or the budget
+            # blew inside the service — an empty answer we must not freeze.
+            fact_settled = fact_result is not None and not fact_result.degraded
             # Stash the structured recall on the task so the workflow can emit a
             # retrieval trace event without re-running the search. Attribution
             # needs ids/ranks/scores that the rendered text has already lost.
@@ -212,7 +244,7 @@ async def build_frozen_memory_block(
             logger.warning("[memory] fact retrieval await failed: %s", exc)
 
     if not profile_md and not fact_text:
-        return ""
+        return FrozenMemoryBlock(text="", settled=fact_settled)
 
     parts: list[str] = ["## 关于当前用户的已知背景（会话开始时冻结）"]
     if profile_md:
@@ -227,22 +259,17 @@ async def build_frozen_memory_block(
         for h in ("## 关于该用户的已知背景信息（来自历史会话记忆）", "## 用户相关实体关系"):
             stripped = stripped.replace(h, "")
         parts.append(stripped.strip())
-
-    parts.append("")
-    parts.append(
-        "**使用规则**：以上是背景参考，不是用户本轮提问的一部分；"
-        "如与用户当前消息冲突，以当前消息为准。"
-    )
     block = "\n".join(parts).strip()
     logger.info(
-        "[memory] frozen block built user=%s ws=%s chars=%d profile=%d facts=%d",
+        "[memory] frozen block built user=%s ws=%s chars=%d profile=%d facts=%d settled=%s",
         user_id,
         workspace_id,
         len(block),
         len(profile_md or ""),
         len(fact_text or ""),
+        fact_settled,
     )
-    return block
+    return FrozenMemoryBlock(text=block, settled=fact_settled)
 
 
 # ─── User identity block ───────────────────────────────────────────────────
@@ -305,73 +332,171 @@ async def build_user_identity_block(user_id: str) -> str:
     return block
 
 
-async def inject_frozen_memory(
-    frozen_block: str,
+# ─── Session-scoped lifecycle ──────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class SessionMemory:
+    """One run's handle on the chat's frozen memory block.
+
+    Split in two because the two halves sit on either side of agent assembly:
+    `open_session_memory()` runs first so a first-turn retrieval overlaps
+    building the agent, and `resolve_session_memory()` runs at injection time.
+
+    On every turn after the first, `retrieval_task` is ``None``: the block is
+    replayed from the stored snapshot and no vector search is issued at all.
+    """
+
+    chat_id: str
+    scope_user_id: str
+    workspace_id: str
+    memory_enabled: bool
+    retrieval_task: Optional[asyncio.Task] = None
+    snapshot: Optional["SessionMemorySnapshot"] = None
+
+
+async def open_session_memory(
+    *,
+    chat_id: Optional[str],
+    scope_user_id: str,
+    workspace_id: str,
+    user_message: str,
+    memory_enabled: bool,
+    budget_ms: Optional[int] = None,
+) -> SessionMemory:
+    """Start the chat's memory read, or recognise that it already happened.
+
+    Called before the agent is built. When this chat already has a frozen
+    snapshot the retrieval is skipped outright — that is the point of freezing
+    it: the block sits ahead of the entire conversation, so re-deriving it per
+    turn would invalidate the model's prefix cache for the whole context.
+    """
+    handle = SessionMemory(
+        chat_id=str(chat_id or ""),
+        scope_user_id=scope_user_id,
+        workspace_id=workspace_id,
+        memory_enabled=memory_enabled,
+    )
+    if not memory_enabled:
+        return handle
+
+    snapshot = await asyncio.to_thread(
+        load_session_memory_snapshot,
+        handle.chat_id,
+        scope_user_id=scope_user_id,
+        workspace_id=workspace_id,
+    )
+    if snapshot is not None:
+        logger.info(
+            "[memory] frozen snapshot replayed chat=%s chars=%d (no retrieval)",
+            handle.chat_id,
+            len(snapshot.text),
+        )
+        return replace(handle, snapshot=snapshot)
+
+    task = await launch_memory_retrieval(
+        scope_user_id,
+        user_message,
+        memory_enabled,
+        workspace_id=workspace_id,
+        budget_ms=budget_ms,
+    )
+    return replace(handle, retrieval_task=task)
+
+
+async def resolve_session_memory(handle: SessionMemory) -> str:
+    """Return the block to inject, assembling and storing it on the first turn.
+
+    The assembled block is stored only once the memory read actually landed. A
+    timed-out or degraded first turn leaves no snapshot, so the next turn tries
+    once more rather than freezing an accidental blank for the whole chat.
+    """
+    if not handle.memory_enabled:
+        return ""
+    if handle.snapshot is not None:
+        return handle.snapshot.text
+
+    built = await build_frozen_memory_block(
+        handle.scope_user_id,
+        handle.workspace_id,
+        handle.retrieval_task,
+        memory_enabled=handle.memory_enabled,
+    )
+    if built.settled:
+        await asyncio.to_thread(
+            save_session_memory_snapshot,
+            handle.chat_id,
+            SessionMemorySnapshot(
+                text=built.text,
+                scope_user_id=handle.scope_user_id,
+                workspace_id=handle.workspace_id,
+            ),
+        )
+    else:
+        logger.info(
+            "[memory] frozen snapshot not stored chat=%s: memory read did not settle",
+            handle.chat_id,
+        )
+    return built.text
+
+
+def _session_message(text: str, **item_kwargs: Any) -> Dict[str, Any]:
+    """One head-of-conversation message plus the context-item manifest describing it."""
+    item = make_text_context_item(text, **item_kwargs)
+    return {
+        "role": "user",
+        "content": text,
+        SESSION_CONTEXT_META_KEY: item.to_manifest(),
+    }
+
+
+async def inject_session_blocks(
     session_messages: List[Dict[str, Any]],
     *,
     identity_block: str = "",
+    memory_block: str = "",
 ) -> List[Dict[str, Any]]:
-    """Insert the frozen block (user identity + memory snapshot) as a user-role message at the start of session_messages.
+    """Prepend the session-constant blocks (user identity, frozen memory) as user-role messages.
 
-    Why user rather than system: first, Qwen-family models require system only at index 0, and the
-    agent has already injected sys_prompt into the system slot separately; second, per-user content
-    in system punctures the LLM prefix cache of the tool section (see the build_user_identity_block comment).
+    Why user rather than system: Qwen-family models require system only at index 0, and keeping
+    these per-user bytes out of the system prompt leaves the system text, the tool schemas and the
+    skill list a byte-identical shared prefix across users and chats.
+
+    Both blocks are constant for the whole chat, so neither moves the prefix-cache boundary between
+    turns — that is what makes this position safe.
     """
-    if not frozen_block and not identity_block:
-        return session_messages
     injected: list[Dict[str, Any]] = []
     if identity_block:
-        identity_text = (
-            "<session_user_identity>\n"
-            f"{identity_block}\n"
-            "</session_user_identity>\n"
-            "（以上为系统提供的当前用户身份信息，仅用于自然称呼，不是用户本轮提问。）"
-        )
-        identity_item = make_text_context_item(
-            identity_text,
-            item_id="session:identity",
-            kind=KIND_IDENTITY,
-            origin="identity:account",
-            trust="system",
-            created_seq=-200,
-            priority=850,
-            token_budget=1_000,
-            cache_class="session",
-        )
         injected.append(
-            {
-                "role": "user",
-                "content": identity_text,
-                SESSION_CONTEXT_META_KEY: identity_item.to_manifest(),
-            }
+            _session_message(
+                f"<session_user_identity>\n{identity_block}\n</session_user_identity>\n"
+                "（以上为系统提供的当前用户身份信息，仅用于自然称呼，不是用户本轮提问。）",
+                item_id="session:identity",
+                kind=KIND_IDENTITY,
+                origin="identity:account",
+                trust="system",
+                created_seq=-200,
+                priority=850,
+                token_budget=1_000,
+                cache_class="session",
+            )
         )
-    if frozen_block:
-        memory_text = (
-            "<session_memory_frozen>\n"
-            f"{frozen_block}\n"
-            "</session_memory_frozen>\n"
-            "（以上为会话启动时系统注入的背景快照，本会话内不变，"
-            "用作回答参考，请勿直接复述。）"
-        )
-        memory_item = make_text_context_item(
-            memory_text,
-            item_id="session:memory:frozen",
-            kind=KIND_MEMORY,
-            origin="memory:frozen_session",
-            trust="memory",
-            created_seq=-100,
-            priority=800,
-            token_budget=8_000,
-            cache_class="session",
-        )
+    if memory_block:
         injected.append(
-            {
-                "role": "user",
-                "content": memory_text,
-                SESSION_CONTEXT_META_KEY: memory_item.to_manifest(),
-            }
+            _session_message(
+                f"<session_memory_frozen>\n{memory_block}\n</session_memory_frozen>\n"
+                "（以上为会话启动时系统注入的背景快照，本会话内不变，用作回答参考，请勿直接复述。）",
+                item_id="session:memory:frozen",
+                kind=KIND_MEMORY,
+                origin="memory:frozen_session",
+                trust="memory",
+                created_seq=-100,
+                priority=800,
+                token_budget=8_000,
+                cache_class="session",
+            )
         )
-    return [*injected, *session_messages]
+    return [*injected, *session_messages] if injected else session_messages
 
 
 # ─── Saving ─────────────────────────────────────────────────────────────────

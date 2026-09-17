@@ -21,6 +21,7 @@ const USER_MARKET_FETCHERS: AgentMarketplaceFetchers = {
   install: installMarketplaceAgent,
 };
 import { useCatalogStore } from '../../stores/catalogStore';
+import { usePanel } from '../../routing/usePanel';
 import { useChatStore } from '../../stores/chatStore';
 import { useAuthStore } from '../../stores/authStore';
 import { ChannelBotsPanel } from '../settings/ChannelBotsPanel';
@@ -132,7 +133,8 @@ export function AgentPanel({ embedded = false }: AgentPanelProps = {}) {
     agents, loading, fetchAgents, deleteAgent, updateAgent, toggleBuiltinAgent, setCurrentAgent,
     fetchAvailableResources, availableResources, importAgents, exportAgent,
   } = useAgentStore();
-  const { panel, panelEntryNonce, setPanel } = useCatalogStore();
+  const panel = usePanel();
+  const { panelEntryNonce, setPanel } = useCatalogStore();
   const { setCurrentChatId, updateStore } = useChatStore();
   const { authUser } = useAuthStore();
   const channelBotEnabled = authUser?.can_create_channel_bot === true;

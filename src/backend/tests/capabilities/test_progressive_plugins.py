@@ -35,7 +35,7 @@ def test_desktop_directory_defers_skill_until_load_plugin(index_db, caps_root, m
     run = runtime.prepare(
         "run", "owner", skill_ids=["report"], plugin_ids=[plan.directory[0].install_id]
     )
-    run = runtime.preflight(run, skill_ids=["report"], plugin_ids=[plan.directory[0].install_id])
+    run = runtime.preflight(run, plugin_ids=[plan.directory[0].install_id])
     basic = SimpleNamespace(mcps=[], skills_or_loaders=[])
     collector = ToolCollector()
     context = {
@@ -79,8 +79,7 @@ def test_partial_plugin_and_explicit_skill_preserve_selected_surface(
     assert plan.deferred_skill_ids == {"report"}
     run = runtime.prepare("partial", "owner", skill_ids=["report"])
     frozen = runtime.preflight(
-        run, skill_ids=["report"], plugin_nodes=plan.directory[0].capability_nodes
-    )
+        run)
     assert frozen.dependency_report["ready"]
     explicit = plugin_loader.resolve_desktop_progressive_plugins(
         **args, invoked_skill_ids=["report"]
@@ -112,8 +111,7 @@ def test_load_plugin_rechecks_definition_before_exposing_skills(
     )
     run = runtime.prepare("revoke", "owner", skill_ids=["report"])
     run = runtime.preflight(
-        run, skill_ids=["report"], plugin_nodes=plan.directory[0].capability_nodes
-    )
+        run)
     loader = runtime.frozen_loader(run)
     basic = SimpleNamespace(mcps=[], skills_or_loaders=[])
     collector = ToolCollector()
@@ -219,8 +217,7 @@ async def test_load_plugin_adds_frozen_mcp_schema_to_live_toolkit(
     }
     runtime.bind_mcp(run, configs, None)
     run = runtime.preflight(
-        run, available_mcp={"lookup-mcp"}, plugin_nodes=plan.directory[0].capability_nodes
-    )
+        run, available_mcp={"lookup-mcp"})
     collector = ToolCollector()
     context = {
         "prepared_run": run,
@@ -260,13 +257,14 @@ def test_plugin_selected_skill_version_constraint_is_not_bypassed(index_db, caps
         },
         owner_user_id="owner",
     )
-    with pytest.raises(PackageMissing):
-        plugin_loader.resolve_desktop_progressive_plugins(
-            user_id="owner", enabled_skill_ids=["report"], enabled_mcp_ids=[]
-        )
+    # 版本约束对不上：这个插件这一轮直接不出现，不影响别的能力。
+    plan = plugin_loader.resolve_desktop_progressive_plugins(
+        user_id="owner", enabled_skill_ids=["report"], enabled_mcp_ids=[]
+    )
+    assert [item.install_id for item in plan.directory] == []
 
 
-def test_preflight_checks_requirement_against_frozen_skill_version(
+def test_activation_checks_requirement_against_frozen_skill_version(
     index_db, caps_root, monkeypatch
 ):
     from core.capabilities.dependency import DependencyMissing
@@ -297,10 +295,10 @@ def test_preflight_checks_requirement_against_frozen_skill_version(
     plan = plugin_loader.resolve_desktop_progressive_plugins(
         user_id="owner", enabled_skill_ids=["report"], enabled_mcp_ids=[]
     )
+    # 约束要拿这一轮冻结的 1.0 去对，而不是拿当前安装的 2.0——所以激活必须被拦下。
+    run = runtime.preflight(run)
     with pytest.raises(DependencyMissing):
-        runtime.preflight(
-            run, skill_ids=["report"], plugin_nodes=plan.directory[0].capability_nodes
-        )
+        runtime.validate_activation(run, plan.directory[0].capability_nodes)
 
 
 @pytest.mark.parametrize("scope", [None, ["sites"]])
@@ -361,14 +359,24 @@ def test_explicit_incomplete_plugin_reports_missing_binding(
         {"slug": "sites", "components": {"skills": ["site-builder"], "mcp": ["site-publish"]}},
         owner_user_id="owner",
     )
-    with pytest.raises(PackageMissing, match="unavailable MCP servers"):
-        plugin_loader.resolve_desktop_progressive_plugins(
+    def resolve():
+        return plugin_loader.resolve_desktop_progressive_plugins(
             user_id="owner",
             enabled_skill_ids=["site-builder"],
             enabled_mcp_ids=[],
             activated_ids=["plugin:local:sites"] if selection == "plugin" else [],
             invoked_skill_ids=["site-builder"] if selection == "skill" else [],
         )
+
+    if selection == "skill":
+        # 模型点名要用的技能靠一个连不上的连接器：这一轮必须停下来说清楚。
+        with pytest.raises(PackageMissing, match="unavailable MCP servers"):
+            resolve()
+        return
+    # 只是把插件加载进来：插件不出现在目录里，它的技能记为不可用。
+    plan = resolve()
+    assert [item.install_id for item in plan.directory] == []
+    assert "site-builder" in plan.unavailable_skill_ids
 
 
 @pytest.mark.asyncio
@@ -412,8 +420,7 @@ async def test_available_namespaced_plugin_publishes_tools_after_activation(
     }
     runtime.bind_mcp(run, configs, None)
     run = runtime.preflight(
-        run, available_mcp=set(configs), plugin_nodes=plan.directory[0].capability_nodes
-    )
+        run, available_mcp=set(configs))
     collector = ToolCollector()
     context = {
         "prepared_run": run,
@@ -466,10 +473,11 @@ def test_explicit_mcp_only_plugin_cannot_vanish(index_db, caps_root, monkeypatch
     plugins.publish_local_plugin(
         {"slug": "lookup", "components": {"mcp": ["missing"]}}, owner_user_id="owner"
     )
-    with pytest.raises(PackageMissing, match="missing"):
-        plugin_loader.resolve_desktop_progressive_plugins(
-            user_id="owner",
-            enabled_skill_ids=[],
-            enabled_mcp_ids=[],
-            activated_ids=["plugin:local:lookup"],
-        )
+    # 插件要的连接器不存在：它这一轮不出现，而不是让整轮失败。
+    plan = plugin_loader.resolve_desktop_progressive_plugins(
+        user_id="owner",
+        enabled_skill_ids=[],
+        enabled_mcp_ids=[],
+        activated_ids=["plugin:local:lookup"],
+    )
+    assert [item.install_id for item in plan.directory] == []

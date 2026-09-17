@@ -18,7 +18,7 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_updater::UpdaterExt;
 use tokio::sync::watch;
 
-use crate::{apply_display_zoom, brand, WEBVIEW_BROWSER_ARGS};
+use crate::brand;
 
 #[derive(Clone, Default, PartialEq, serde::Serialize)]
 pub struct UpdateStatus {
@@ -242,10 +242,15 @@ pub fn check_and_install(app: AppHandle, update_base: String, silent: bool) {
 
                 match result {
                     Ok(_) => {
-                        if let Some(w) = progress_win {
-                            let _ = w.close();
+                        // Windows 到不了这里：`download_and_install` 拉起 NSIS 安装器后
+                        // 立即 `exit(0)`，进度窗随进程消失，重启由安装器的 `/R` 完成。
+                        #[cfg(not(windows))]
+                        {
+                            if let Some(w) = progress_win {
+                                let _ = w.close();
+                            }
+                            app.restart();
                         }
-                        app.restart();
                     }
                     Err(e) => {
                         if let Some(w) = progress_win {
@@ -295,8 +300,6 @@ fn build_progress_window(app: &AppHandle, port: u16) -> Result<WebviewWindow, St
                     let _ = ready.send(());
                 }
             })
-            // Every WebView2 window must use the same browser environment arguments.
-            .additional_browser_args(WEBVIEW_BROWSER_ARGS)
             .inner_size(460.0, 168.0)
             .resizable(false)
             .minimizable(false)
@@ -306,7 +309,6 @@ fn build_progress_window(app: &AppHandle, port: u16) -> Result<WebviewWindow, St
             .center()
             .build()
             .map_err(|error| format!("创建窗口失败：{error}"))?;
-    apply_display_zoom(&window);
     if let Err(error) = loaded.recv_timeout(std::time::Duration::from_secs(15)) {
         let _ = window.close();
         return Err(format!("等待更新页面加载失败：{error}"));
@@ -438,7 +440,7 @@ mod tests {
             serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
         assert_eq!(
             config["plugins"]["updater"]["windows"]["installMode"],
-            "quiet"
+            "passive"
         );
     }
 }

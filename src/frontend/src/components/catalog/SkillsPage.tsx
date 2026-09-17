@@ -9,6 +9,7 @@ import { useDeploymentModeStore } from '../../stores/deploymentModeStore';
 import { mergeDeviceSkills } from '../../utils/deviceSkillCatalog';
 import { SearchOutlined, LeftOutlined, PlusOutlined, DeleteOutlined, UploadOutlined, EditOutlined, DownOutlined, AppstoreAddOutlined, CloudUploadOutlined, DownloadOutlined, FileTextOutlined, SaveOutlined } from '@ant-design/icons';
 import { useAgentStore, useCatalogStore, useAuthStore } from '../../stores';
+import { usePanel } from '../../routing/usePanel';
 import type { PanelKey, MarketplaceFetchers, MarketplaceSubmission, OntologyTagOption } from '../../types';
 import { isCatalogKind, MARKETPLACE_CATEGORIES } from '../../utils/constants';
 import { mdToHtml } from '../../utils/markdown';
@@ -58,9 +59,9 @@ export function SkillsPage({ embedded = false }: { embedded?: boolean }) {
   const deviceSkills = useDesktopCapabilityStore((s) => s.kinds.skill.items);
   const discoveryErrors = useDesktopCapabilityStore((s) => s.kinds.skill.discoveryErrors);
   const dual = useDeploymentModeStore((s) => s.provisionMode === 'dual');
+  const panel = usePanel();
   const {
     catalog,
-    panel,
     panelEntryNonce,
     manageQuery, setManageQuery,
     toggleItem,

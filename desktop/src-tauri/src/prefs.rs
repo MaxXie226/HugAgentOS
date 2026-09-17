@@ -1,7 +1,7 @@
 //! 桌面客户端本地 UI 偏好持久化。
 //!
-//! 目前只存「关闭主窗口时的选择」（最小化 / 退出），落盘在
-//! `<应用配置目录>/prefs.json`，让用户选过一次后不再每次弹框。
+//! 存「关闭主窗口时的选择」（最小化 / 退出）与「视图缩放档位」，落盘在
+//! `<应用配置目录>/prefs.json`，让用户选过一次后不再每次重设。
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -21,6 +21,9 @@ struct Prefs {
     /// None = 尚未记住，关闭时仍弹框询问。
     #[serde(default)]
     close_action: Option<CloseAction>,
+    /// 「视图 → 放大 / 缩小」选定的页面缩放。None = 未调整过，跟随系统显示设置。
+    #[serde(default)]
+    ui_zoom: Option<f64>,
 }
 
 fn path(config_dir: &Path) -> PathBuf {
@@ -62,5 +65,18 @@ pub fn save_close_action(config_dir: &Path, action: CloseAction) {
 pub fn clear_close_action(config_dir: &Path) {
     let mut p = read(config_dir);
     p.close_action = None;
+    write(config_dir, &p);
+}
+
+/// 读取视图缩放档位（None = 未设置过）。取值是否合法由调用方归一化，
+/// 与 `load_close_action` 一样只做存取、不带策略。
+pub fn load_ui_zoom(config_dir: &Path) -> Option<f64> {
+    read(config_dir).ui_zoom
+}
+
+/// 记住视图缩放档位，新开窗口与下次启动都沿用。
+pub fn save_ui_zoom(config_dir: &Path, zoom: f64) {
+    let mut p = read(config_dir);
+    p.ui_zoom = Some(zoom);
     write(config_dir, &p);
 }

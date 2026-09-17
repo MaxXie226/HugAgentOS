@@ -224,13 +224,23 @@ pub fn on_cloud_login(
             // Capability readiness is observed independently of token renewal.
             // A retry or explicit partial choice takes effect on the next poll,
             // even when the user leaves the failure card open for several minutes.
+            // 只在「还没就绪」时轮询：首次同步完成后停下来睡到下一次令牌续期，
+            // 之后的能力变动由变更号驱动，不需要有人一直敲门。
             let next_renewal = tokio::time::Instant::now()
                 + std::time::Duration::from_secs(delay);
             while tokio::time::Instant::now() < next_renewal {
                 if !current_session(&session_epoch, expected, &session_token, &token).await {
                     return;
                 }
-                if bridge_sync.read().await.models_ready {
+                let (models_ready, capabilities_ready) = {
+                    let sync = bridge_sync.read().await;
+                    (sync.models_ready, sync.capabilities_ready)
+                };
+                if capabilities_ready {
+                    tokio::time::sleep_until(next_renewal).await;
+                    break;
+                }
+                if models_ready {
                     let readiness = read_capability_readiness(&http, &bridge_secret).await;
                     if !current_session(&session_epoch, expected, &session_token, &token).await {
                         return;

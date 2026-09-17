@@ -19,73 +19,43 @@ if sys.platform != "win32":  # pragma: no cover - guarded at import site
 advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
-# ── Token access rights and creation flags ───────────────────────────────────
+# ── Token access rights, creation flags and information classes ──────────────
 TOKEN_ASSIGN_PRIMARY = 0x0001
 TOKEN_DUPLICATE = 0x0002
 TOKEN_QUERY = 0x0008
 TOKEN_ADJUST_PRIVILEGES = 0x0020
 TOKEN_ADJUST_DEFAULT = 0x0080
-TOKEN_ADJUST_SESSIONID = 0x0100
 
 DISABLE_MAX_PRIVILEGE = 0x01
-LUA_TOKEN = 0x04
-WRITE_RESTRICTED = 0x08
 
-TOKEN_USER_CLASS = 1
-TOKEN_GROUPS_CLASS = 2
-TOKEN_DEFAULT_DACL_CLASS = 6
-TOKEN_LINKED_TOKEN_CLASS = 19
-
-SE_GROUP_LOGON_ID = 0xC0000000
+TOKEN_INTEGRITY_LEVEL_CLASS = 25
+SE_GROUP_INTEGRITY = 0x00000020
 SE_PRIVILEGE_ENABLED = 0x00000002
-WIN_WORLD_SID = 1
 
-# ── Access control ───────────────────────────────────────────────────────────
-GRANT_ACCESS = 1
-DENY_ACCESS = 3
-TRUSTEE_IS_SID = 0
-TRUSTEE_IS_UNKNOWN = 0
-NO_MULTIPLE_TRUSTEE = 0
-NO_INHERITANCE = 0x0
-OBJECT_INHERIT_ACE = 0x1
-CONTAINER_INHERIT_ACE = 0x2
-SUB_CONTAINERS_AND_OBJECTS_INHERIT = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE
-
-GENERIC_ALL = 0x10000000
-# What Windows stores after mapping GENERIC_ALL onto a file object. An ACE read
-# back from disk carries this, never the generic form, so it is what an
-# already-applied grant has to be compared against.
-FILE_ALL_ACCESS = 0x001F01FF
+# ── Mandatory integrity labels (SDDL names, accepted by the SID and SD parsers)
+LOW_INTEGRITY = "LW"
+MEDIUM_INTEGRITY = "ME"
+SDDL_REVISION_1 = 1
 SE_FILE_OBJECT = 1
-DACL_SECURITY_INFORMATION = 0x00000004
-
-ACCESS_ALLOWED_ACE_TYPE = 0x0
-ACCESS_DENIED_ACE_TYPE = 0x1
-# Offset of the SID inside ACCESS_ALLOWED_ACE / ACCESS_DENIED_ACE: a 4-byte
-# ACE_HEADER followed by a 4-byte ACCESS_MASK.
-ACE_SID_OFFSET = 8
-ACL_SIZE_INFORMATION_CLASS = 2
+LABEL_SECURITY_INFORMATION = 0x00000010
 
 ERROR_SUCCESS = 0
+ERROR_FILE_NOT_FOUND = 2
+ERROR_PATH_NOT_FOUND = 3
 
 # ── Process creation ─────────────────────────────────────────────────────────
 CREATE_UNICODE_ENVIRONMENT = 0x00000400
 CREATE_NO_WINDOW = 0x08000000
 CREATE_NEW_PROCESS_GROUP = 0x00000200
 STARTF_USESTDHANDLES = 0x00000100
-STD_INPUT_HANDLE = -10
-STD_OUTPUT_HANDLE = -11
-STD_ERROR_HANDLE = -12
-HANDLE_FLAG_INHERIT = 0x00000001
-INFINITE = 0xFFFFFFFF
 
 
 class SID_AND_ATTRIBUTES(ctypes.Structure):
     _fields_ = [("Sid", ctypes.c_void_p), ("Attributes", wintypes.DWORD)]
 
 
-class TOKEN_USER(ctypes.Structure):
-    _fields_ = [("User", SID_AND_ATTRIBUTES)]
+class TOKEN_MANDATORY_LABEL(ctypes.Structure):
+    _fields_ = [("Label", SID_AND_ATTRIBUTES)]
 
 
 class LUID(ctypes.Structure):
@@ -98,55 +68,6 @@ class LUID_AND_ATTRIBUTES(ctypes.Structure):
 
 class TOKEN_PRIVILEGES(ctypes.Structure):
     _fields_ = [("PrivilegeCount", wintypes.DWORD), ("Privileges", LUID_AND_ATTRIBUTES * 1)]
-
-
-class TRUSTEE_W(ctypes.Structure):
-    _fields_ = [
-        ("pMultipleTrustee", ctypes.c_void_p),
-        ("MultipleTrusteeOperation", ctypes.c_int),
-        ("TrusteeForm", ctypes.c_int),
-        ("TrusteeType", ctypes.c_int),
-        ("ptstrName", ctypes.c_void_p),
-    ]
-
-
-class EXPLICIT_ACCESS_W(ctypes.Structure):
-    _fields_ = [
-        ("grfAccessPermissions", wintypes.DWORD),
-        ("grfAccessMode", ctypes.c_int),
-        ("grfInheritance", wintypes.DWORD),
-        ("Trustee", TRUSTEE_W),
-    ]
-
-
-class ACL_SIZE_INFORMATION(ctypes.Structure):
-    _fields_ = [
-        ("AceCount", wintypes.DWORD),
-        ("AclBytesInUse", wintypes.DWORD),
-        ("AclBytesFree", wintypes.DWORD),
-    ]
-
-
-class ACE_HEADER(ctypes.Structure):
-    _fields_ = [
-        ("AceType", ctypes.c_ubyte),
-        ("AceFlags", ctypes.c_ubyte),
-        ("AceSize", wintypes.WORD),
-    ]
-
-
-class ACCESS_ACE(ctypes.Structure):
-    """Common prefix of ACCESS_ALLOWED_ACE and ACCESS_DENIED_ACE."""
-
-    _fields_ = [("Header", ACE_HEADER), ("Mask", wintypes.DWORD)]
-
-
-class TOKEN_DEFAULT_DACL(ctypes.Structure):
-    _fields_ = [("DefaultDacl", ctypes.c_void_p)]
-
-
-class TOKEN_LINKED_TOKEN(ctypes.Structure):
-    _fields_ = [("LinkedToken", wintypes.HANDLE)]
 
 
 class STARTUPINFOW(ctypes.Structure):
@@ -185,16 +106,6 @@ OpenProcessToken = advapi32.OpenProcessToken
 OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
 OpenProcessToken.restype = wintypes.BOOL
 
-GetTokenInformation = advapi32.GetTokenInformation
-GetTokenInformation.argtypes = [
-    wintypes.HANDLE,
-    ctypes.c_int,
-    ctypes.c_void_p,
-    wintypes.DWORD,
-    ctypes.POINTER(wintypes.DWORD),
-]
-GetTokenInformation.restype = wintypes.BOOL
-
 SetTokenInformation = advapi32.SetTokenInformation
 SetTokenInformation.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
 SetTokenInformation.restype = wintypes.BOOL
@@ -208,31 +119,46 @@ CreateRestrictedToken.argtypes = [
     wintypes.DWORD,
     ctypes.c_void_p,
     wintypes.DWORD,
-    ctypes.POINTER(SID_AND_ATTRIBUTES),
+    ctypes.c_void_p,
     ctypes.POINTER(wintypes.HANDLE),
 ]
 CreateRestrictedToken.restype = wintypes.BOOL
-
-CreateWellKnownSid = advapi32.CreateWellKnownSid
-CreateWellKnownSid.argtypes = [
-    ctypes.c_int,
-    ctypes.c_void_p,
-    ctypes.c_void_p,
-    ctypes.POINTER(wintypes.DWORD),
-]
-CreateWellKnownSid.restype = wintypes.BOOL
 
 ConvertStringSidToSidW = advapi32.ConvertStringSidToSidW
 ConvertStringSidToSidW.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_void_p)]
 ConvertStringSidToSidW.restype = wintypes.BOOL
 
-GetLengthSid = advapi32.GetLengthSid
-GetLengthSid.argtypes = [ctypes.c_void_p]
-GetLengthSid.restype = wintypes.DWORD
+ConvertStringSecurityDescriptorToSecurityDescriptorW = (
+    advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW
+)
+ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
+    wintypes.LPCWSTR,
+    wintypes.DWORD,
+    ctypes.POINTER(ctypes.c_void_p),
+    ctypes.POINTER(wintypes.ULONG),
+]
+ConvertStringSecurityDescriptorToSecurityDescriptorW.restype = wintypes.BOOL
 
-CopySid = advapi32.CopySid
-CopySid.argtypes = [wintypes.DWORD, ctypes.c_void_p, ctypes.c_void_p]
-CopySid.restype = wintypes.BOOL
+ConvertSecurityDescriptorToStringSecurityDescriptorW = (
+    advapi32.ConvertSecurityDescriptorToStringSecurityDescriptorW
+)
+ConvertSecurityDescriptorToStringSecurityDescriptorW.argtypes = [
+    ctypes.c_void_p,
+    wintypes.DWORD,
+    wintypes.DWORD,
+    ctypes.POINTER(ctypes.c_wchar_p),
+    ctypes.POINTER(wintypes.ULONG),
+]
+ConvertSecurityDescriptorToStringSecurityDescriptorW.restype = wintypes.BOOL
+
+GetSecurityDescriptorSacl = advapi32.GetSecurityDescriptorSacl
+GetSecurityDescriptorSacl.argtypes = [
+    ctypes.c_void_p,
+    ctypes.POINTER(wintypes.BOOL),
+    ctypes.POINTER(ctypes.c_void_p),
+    ctypes.POINTER(wintypes.BOOL),
+]
+GetSecurityDescriptorSacl.restype = wintypes.BOOL
 
 LookupPrivilegeValueW = advapi32.LookupPrivilegeValueW
 LookupPrivilegeValueW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR, ctypes.POINTER(LUID)]
@@ -248,15 +174,6 @@ AdjustTokenPrivileges.argtypes = [
     ctypes.c_void_p,
 ]
 AdjustTokenPrivileges.restype = wintypes.BOOL
-
-SetEntriesInAclW = advapi32.SetEntriesInAclW
-SetEntriesInAclW.argtypes = [
-    wintypes.ULONG,
-    ctypes.POINTER(EXPLICIT_ACCESS_W),
-    ctypes.c_void_p,
-    ctypes.POINTER(ctypes.c_void_p),
-]
-SetEntriesInAclW.restype = wintypes.DWORD
 
 GetNamedSecurityInfoW = advapi32.GetNamedSecurityInfoW
 GetNamedSecurityInfoW.argtypes = [
@@ -299,18 +216,6 @@ CreateProcessAsUserW.argtypes = [
 ]
 CreateProcessAsUserW.restype = wintypes.BOOL
 
-GetAclInformation = advapi32.GetAclInformation
-GetAclInformation.argtypes = [ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD, ctypes.c_int]
-GetAclInformation.restype = wintypes.BOOL
-
-GetAce = advapi32.GetAce
-GetAce.argtypes = [ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p)]
-GetAce.restype = wintypes.BOOL
-
-EqualSid = advapi32.EqualSid
-EqualSid.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-EqualSid.restype = wintypes.BOOL
-
 GetCurrentProcess = kernel32.GetCurrentProcess
 GetCurrentProcess.argtypes = []
 GetCurrentProcess.restype = wintypes.HANDLE
@@ -322,14 +227,6 @@ CloseHandle.restype = wintypes.BOOL
 LocalFree = kernel32.LocalFree
 LocalFree.argtypes = [ctypes.c_void_p]
 LocalFree.restype = ctypes.c_void_p
-
-GetStdHandle = kernel32.GetStdHandle
-GetStdHandle.argtypes = [wintypes.DWORD]
-GetStdHandle.restype = wintypes.HANDLE
-
-SetHandleInformation = kernel32.SetHandleInformation
-SetHandleInformation.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD]
-SetHandleInformation.restype = wintypes.BOOL
 
 WaitForSingleObject = kernel32.WaitForSingleObject
 WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]

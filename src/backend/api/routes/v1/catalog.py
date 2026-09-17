@@ -676,6 +676,17 @@ def update_catalog_item(
             data={"allowed_fields": ["enabled", "config"]},
         )
 
+    # 云端下发的连接器不在本机目录里，它是在目录解析之后按 mcp.json 的托管标志
+    # 追加回来的——所以启停只有写进那里才作数，写目录覆盖不会生效。
+    if normalized_kind == "mcp" and request.enabled is not None:
+        from core.services.desktop_cloud_bridge import set_managed_connector_enabled
+
+        if set_managed_connector_enabled(id, request.enabled):
+            return success_response(
+                data={"kind": normalized_kind, "id": id, "enabled": request.enabled, "config": {}},
+                message="Connector toggle saved on this device",
+            )
+
     # KB toggles are not persisted in DB catalog_overrides (no kb enum in schema).
     # Frontend persists UI preference locally; backend accepts request for API uniformity.
     if normalized_kind == "kb":

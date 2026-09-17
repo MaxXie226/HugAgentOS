@@ -42,12 +42,17 @@ class MigrationReport:
     quarantined: List[str] = field(default_factory=list)
     removed_links: List[str] = field(default_factory=list)
     removed_session_copies: List[str] = field(default_factory=list)
+    removed_run_copies: List[str] = field(default_factory=list)
     skipped: Dict[str, str] = field(default_factory=dict)
 
     @property
     def changed(self) -> bool:
         return bool(
-            self.imported or self.quarantined or self.removed_links or self.removed_session_copies
+            self.imported
+            or self.quarantined
+            or self.removed_links
+            or self.removed_session_copies
+            or self.removed_run_copies
         )
 
     def to_dict(self) -> Dict[str, object]:
@@ -223,6 +228,34 @@ def _sweep_sessions(report: MigrationReport, workspace: Path) -> None:
             report.removed_session_copies.append(str(link))
 
 
+def _drop_run_copies(report: MigrationReport) -> None:
+    """回收按轮复制的快照 / 执行副本，以及形状已变的运行记录。
+
+    冻结改为钉在不可变存储的版本目录上之后，``snapshots`` 与 ``execution`` 两棵
+    树不再有人写也不再有人读；它们此前每轮各存一份完整技能副本，占盘可达数 GB。
+    同期写下的运行记录带着已删除的字段，读回来会直接报错，一并清掉。
+    """
+    from core.db.models import ContentBlock
+
+    from . import registry
+    from .paths import require_root
+    from .runtime import _PREFIX, PreparedRun
+
+    known = set(PreparedRun.__dataclass_fields__)
+    with registry._session() as db:
+        for row in db.query(ContentBlock).filter(ContentBlock.id.like(_PREFIX + "%")).all():
+            payload = row.payload if isinstance(row.payload, dict) else {}
+            if set(payload) - known:
+                db.delete(row)
+                report.removed_run_copies.append(row.id)
+    root = require_root() / ".capabilities"
+    for name in ("snapshots", "execution"):
+        stale = root / name
+        if stale.is_dir():
+            shutil.rmtree(stale, ignore_errors=True)
+            report.removed_run_copies.append(str(stale))
+
+
 def migrate_legacy_layout() -> Optional[MigrationReport]:
     """Run the migration once per process start when the store is enabled."""
     if not capabilities_enabled():
@@ -248,6 +281,7 @@ def migrate_legacy_layout() -> Optional[MigrationReport]:
         _quarantine(report, legacy_cloud, "skills_cloud")
     _sweep_sessions(report, workspace)
     _import_flat_skills(report)
+    _drop_run_copies(report)
 
     if report.changed or report.skipped:
         log_path = migrations_root() / f"{time.strftime('%Y%m%d-%H%M%S')}.json"
@@ -255,11 +289,13 @@ def migrate_legacy_layout() -> Optional[MigrationReport]:
             json.dumps(report.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8"
         )
         logger.info(
-            "[caps-migration] imported=%d quarantined=%d links=%d session_copies=%d skipped=%d log=%s",
+            "[caps-migration] imported=%d quarantined=%d links=%d session_copies=%d "
+            "run_copies=%d skipped=%d log=%s",
             len(report.imported),
             len(report.quarantined),
             len(report.removed_links),
             len(report.removed_session_copies),
+            len(report.removed_run_copies),
             len(report.skipped),
             log_path,
         )

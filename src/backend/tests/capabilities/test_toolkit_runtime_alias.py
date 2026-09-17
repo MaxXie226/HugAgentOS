@@ -10,7 +10,6 @@ from agentscope.tool import Toolkit
 from agentscope.state import AgentState
 from core.agent_skills.loader import MultiSourceSkillLoader
 from core.capabilities import registry, runtime, skills, store
-from core.capabilities.errors import IntegrityFailed, PermissionDenied
 from core.llm.agent_factory import create_agent_executor
 from core.llm.tool_collector import ToolCollector
 from core.llm.tools.skill_tool import register_sandboxed_view_text_file
@@ -119,13 +118,16 @@ async def test_native_projection_rechecks_frozen_authorization_and_hash_before_c
     toolkit = Toolkit(
         skills_or_loaders=collector.skill_loaders, skill_instruction_template=factory_template()
     )
-    await toolkit.get_skill_instructions()
+    assert "- `mine`" in await toolkit.get_skill_instructions()
     if mutation == "revoke":
         registry.set_enabled("skill:local:mine", False)
     else:
         (prepared.view_dir / "mine" / "SKILL.md").write_text("changed")
-    with pytest.raises((IntegrityFailed, PermissionDenied)):
-        await toolkit.get_skill_instructions()
+    # 撤销或篡改之后这个技能整个从枚举里消失，缓存也不能把旧内容再交出去；
+    # 它只摘掉自己，不牵连这一轮里别的能力。
+    after = await toolkit.get_skill_instructions() or ""
+    assert "- `mine`" not in after and "CACHED_BODY" not in after
+    assert await toolkit._get_available_skills() == {}
 
 
 def test_explicit_skill_hint_uses_authorized_alias_instead_of_store_revision(frozen, monkeypatch):
@@ -197,5 +199,5 @@ async def test_desktop_batched_loader_matches_native_and_rechecks(frozen, monkey
         registry.set_enabled("skill:local:alias", False)
     else:
         (prepared.view_dir / "alias" / "SKILL.md").write_text("changed")
-    with pytest.raises((IntegrityFailed, PermissionDenied)):
-        await instance.list_skills()
+    # 批量加载器与原生加载器同样的判据：撤销或篡改之后这份不再出现在清单里。
+    assert await instance.list_skills() == []

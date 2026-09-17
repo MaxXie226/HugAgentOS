@@ -28,19 +28,27 @@ api/routes/v1/chats.py
   │
   ▼
 orchestration/workflow.py
-  ├─► launch_memory_retrieval()            ← 后台 task，立即返回（不阻塞）
-  │     └─ core/memory/service.retrieve_memories()
-  │          ├─ mem0.Memory.search() → Milvus 向量检索
-  │          └─ core/memory/graph.py → Neo4j 实体关系检索（可选）
+  ├─► open_session_memory()                ← 会话级：本会话已有冻结块则直接取出，
+  │     │                                     **完全不发起检索**
+  │     └─ 仅首轮：launch_memory_retrieval() 后台 task，立即返回（不阻塞）
+  │          └─ core/memory/service.retrieve_memories()
+  │               ├─ mem0.Memory.search() → Milvus 向量检索
+  │               └─ core/memory/graph.py → Neo4j 实体关系检索（可选）
   │
-  ├─► build_frozen_memory_block()          ← 组装"会话冻结块"
+  ├─► resolve_session_memory()             ← 后续轮次原样复用已存快照；
+  │     │                                     首轮才调 build_frozen_memory_block()
   │     · L1 Profile：读 DB，<20ms，必等
   │     · L2 Procedure：await 检索 task，预算 600ms（MEMORY_RETRIEVAL_BUDGET_MS）
   │       超时则 shield 后台 task、跳过本轮注入；task 继续完成且状态可观测
+  │     · 检索确实落地后把冻结块写入 ChatSession.metadata；超时或降级则不写，
+  │       留给下一轮重试，避免把一次失败冻结成整个会话的空记忆
   │
-  ├─► inject_frozen_memory()               ← 冻结块以 user-role 消息插到
-  │                                           session_messages 开头
-  │     （用 user 而非 system：Qwen 等模型要求 system 仅在 index 0）
+  ├─► inject_session_blocks()              ← 会话常量块（身份 + 冻结记忆）以 user-role
+  │                                           消息插到 session_messages 开头
+  │     （用 user 而非 system：Qwen 等模型要求 system 仅在 index 0；更重要的是把这些
+  │       按用户变化的字节挡在 system 之外，系统提示词、工具定义、技能清单才能对所有
+  │       用户/会话保持逐字节相同的共享前缀。两个块整个会话不变，所以摆在历史最前面
+  │       也不会在轮次之间挪动前缀缓存边界）
   │
   ▼  …… Agent 流式执行，SSE 输出 ……
   │

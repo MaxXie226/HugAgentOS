@@ -5,6 +5,7 @@ import { t } from '../../i18n';
 import { DeviceCapabilityBadge } from './DeviceCapabilityBadge';
 import { SearchOutlined, LeftOutlined, PlusOutlined, DeleteOutlined, AppstoreOutlined, CloudUploadOutlined, DownOutlined } from '@ant-design/icons';
 import { useCatalogStore, useAuthStore } from '../../stores';
+import { usePanel } from '../../routing/usePanel';
 import { mdToHtml } from '../../utils/markdown';
 import { staggerStyle } from '../../utils/motionTokens';
 import { DRILL_IN_BACK, DRILL_IN_DETAIL } from '../../utils/motionVariants';
@@ -30,9 +31,9 @@ const MCP_PAGE_SIZE = 12;
 const MCP_MARKET_CATEGORIES = ['信息检索', '数据分析', '内容创作', '办公协作', '研发工具', '业务系统', '自动化', '通用工具'];
 
 export function McpPage({ embedded = false }: { embedded?: boolean }) {
+  const panel = usePanel();
   const {
     catalog,
-    panel,
     panelEntryNonce,
     manageQuery, setManageQuery,
     toggleItem,

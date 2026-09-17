@@ -84,15 +84,21 @@ def local_skill(index_db, caps_root, monkeypatch):
     return publish
 
 
-def test_execution_outputs_and_source_edits_do_not_break_other_runs(local_skill):
-    source = local_skill("news")
-    run = runtime.prepare("first", "owner", skill_ids=["news"], allow_unavailable=True)
-    (run.view_dir / "news" / "query.json").write_text("{}")
-    assert not (source.path / "query.json").exists()
-    source.entry_file.write_text(source.entry_file.read_text().replace("Original", "Updated"))
+def test_source_edits_do_not_change_an_already_running_turn(local_skill):
+    """改一个本机技能会发布出新版本；已经开跑的那一轮仍然看到它冻结的那一版。"""
+    local_skill("news")
+    run = runtime.prepare("first", "owner", skill_ids=["news"])
+    assert "Original" in (run.view_dir / "news" / "SKILL.md").read_text()
+    updated = "---\nname: news\ndescription: Test skill\n---\nUpdated instructions"
+    skills.publish_local_skill(
+        "news",
+        files={"SKILL.md": updated},
+        content_hash=skill_content_hash(updated, {}),
+        owner_user_id="owner",
+    )
     runtime.validate(run)
     assert "Original" in (run.view_dir / "news" / "SKILL.md").read_text()
-    following = runtime.prepare("second", "owner", skill_ids=["news"], allow_unavailable=True)
+    following = runtime.prepare("second", "owner", skill_ids=["news"])
     assert "Updated" in (following.view_dir / "news" / "SKILL.md").read_text()
 
 
@@ -100,22 +106,28 @@ def test_missing_skill_and_unselected_broken_skill_do_not_block(local_skill):
     local_skill("good")
     bad = local_skill("bad")
     bad.entry_file.unlink()
-    run = runtime.prepare("missing", "owner", skill_ids=["good", "absent"], allow_unavailable=True)
+    run = runtime.prepare("missing", "owner", skill_ids=["good", "absent"])
     assert set(run.bindings) == {"good"}
     assert "absent" in run.unavailable
     runtime.validate(run)
 
 
-def test_execution_copy_keeps_executable_scripts(local_skill):
+def test_executable_scripts_stay_executable_in_the_view(local_skill):
     import os
 
     if os.name == "nt":
         pytest.skip("POSIX executable bits")
-    source = local_skill("executable")
-    script = source.path / "run.sh"
-    script.write_text("#!/bin/sh\necho ready\n")
-    script.chmod(0o755)
-    run = runtime.prepare("executable", "owner", skill_ids=["executable"], allow_unavailable=True)
+    local_skill("placeholder")
+    md = "---\nname: executable\ndescription: Test skill\n---\nOriginal instructions"
+    extra = {"run.sh": "#!/bin/sh\necho ready\n"}
+    component = skills.publish_local_skill(
+        "executable",
+        files={"SKILL.md": md, **extra},
+        content_hash=skill_content_hash(md, extra),
+        owner_user_id="owner",
+    )
+    (component.path / "run.sh").chmod(0o755)
+    run = runtime.prepare("executable", "owner", skill_ids=["executable"])
     assert os.access(run.view_dir / "executable" / "run.sh", os.X_OK)
 
 
@@ -125,7 +137,7 @@ def test_disabled_skill_disappears_without_blocking_other_skills(local_skill):
     local_skill("good")
     local_skill("disabled")
     run = runtime.prepare(
-        "disabled", "owner", skill_ids=["good", "disabled"], allow_unavailable=True
+        "disabled", "owner", skill_ids=["good", "disabled"]
     )
     registry.set_enabled("skill:local:disabled", False)
     runtime.view_for_execution(run.run_id, "owner")
@@ -133,39 +145,49 @@ def test_disabled_skill_disappears_without_blocking_other_skills(local_skill):
     assert not (run.view_dir / "disabled").exists()
 
 
-def test_foreign_directory_is_preserved_but_not_exposed(local_skill):
-    from core.capabilities import registry
+def test_foreign_directory_is_preserved_and_the_run_stops(local_skill):
+    """视图里冒出一个真实目录：既不能删掉用户的东西，也不能把它交给沙箱。
+
+    所以这一轮明确失败，而不是另起一个影子视图继续跑——后者会留下一个永不刷新、
+    白占盘的半成品，正是不该有的兜底。
+    """
+    from core.capabilities.errors import ViewUnavailable
 
     local_skill("good")
     local_skill("disabled")
-    run = runtime.prepare(
-        "foreign", "owner", skill_ids=["good", "disabled"], allow_unavailable=True
-    )
+    run = runtime.prepare("foreign", "owner", skill_ids=["good", "disabled"])
     foreign = run.view_dir / "disabled"
     foreign.unlink()
     foreign.mkdir()
     (foreign / "private.txt").write_text("keep")
-    registry.set_enabled("skill:local:disabled", False)
-    actual = runtime.view_for_execution(run.run_id, "owner")
-    assert actual != run.view_dir
-    assert not (actual / "disabled").exists()
+    with pytest.raises(ViewUnavailable):
+        runtime.rebuild(run)
     assert (foreign / "private.txt").read_text() == "keep"
-    assert (actual / "good" / "SKILL.md").is_file()
 
 
 def test_edited_required_dependency_is_included_and_usable(local_skill):
     parent = local_skill("parent")
-    child = local_skill("child")
-    parent.entry_file.write_text(
-        parent.entry_file.read_text().replace(
-            "description: Test skill",
-            "description: Test skill\ndependencies:\n  - kind: skill\n    id: child",
-        )
+    local_skill("child")
+    parent_md = parent.entry_file.read_text().replace(
+        "description: Test skill",
+        "description: Test skill\ndependencies:\n  - kind: skill\n    id: child",
     )
-    child.entry_file.write_text(child.entry_file.read_text().replace("Original", "Updated"))
-    run = runtime.prepare("dependencies", "owner", skill_ids=["parent"], allow_unavailable=True)
+    skills.publish_local_skill(
+        "parent",
+        files={"SKILL.md": parent_md},
+        content_hash=skill_content_hash(parent_md, {}),
+        owner_user_id="owner",
+    )
+    child_md = "---\nname: child\ndescription: Test skill\n---\nUpdated instructions"
+    skills.publish_local_skill(
+        "child",
+        files={"SKILL.md": child_md},
+        content_hash=skill_content_hash(child_md, {}),
+        owner_user_id="owner",
+    )
+    run = runtime.prepare("dependencies", "owner", skill_ids=["parent"])
     assert set(run.bindings) == {"parent", "child"}
-    checked = runtime.preflight(run, skill_ids=["parent"], available_models=set())
+    checked = runtime.preflight(run, available_models=set())
     assert not checked.unavailable
     assert "Updated" in (checked.view_dir / "child" / "SKILL.md").read_text()
 
@@ -178,7 +200,7 @@ async def test_revoked_skill_returns_tool_error_and_other_skill_stays_readable(l
 
     local_skill("good")
     local_skill("disabled")
-    run = runtime.prepare("reader", "owner", skill_ids=["good", "disabled"], allow_unavailable=True)
+    run = runtime.prepare("reader", "owner", skill_ids=["good", "disabled"])
     loader = runtime.frozen_loader(run)
     collector = ToolCollector()
     register_sandboxed_view_text_file(
@@ -193,7 +215,7 @@ async def test_revoked_skill_returns_tool_error_and_other_skill_stays_readable(l
 
 
 def test_connector_update_excludes_only_changed_binding(local_skill):
-    run = runtime.prepare("connector-update", "owner", skill_ids=[], allow_unavailable=True)
+    run = runtime.prepare("connector-update", "owner", skill_ids=[])
     first = {"one": {"command": "old"}, "two": {"command": "stable"}}
     runtime.bind_mcp(run, first, None)
     changed = runtime.bind_mcp(run, {"one": {"command": "new"}, "two": first["two"]}, None)
@@ -204,16 +226,14 @@ def test_connector_update_excludes_only_changed_binding(local_skill):
     assert runtime.get(run.run_id).unavailable["mcp:one"] == "connector_changed"
 
 
-def test_legacy_changed_run_recovers_without_replaying_changed_skill(local_skill):
+def test_interrupted_run_drops_only_the_changed_skill(local_skill):
+    """中断之后有人动了已发布的版本目录：恢复时只摘掉这一个，其余照常可用。"""
     local_skill("good")
     changed = local_skill("changed")
     runtime.prepare("legacy", "owner", skill_ids=["good", "changed"])
     changed.entry_file.write_text("Changed after interruption")
-    resumed = runtime.prepare(
-        "legacy", "owner", skill_ids=["good", "changed"], allow_unavailable=True
-    )
-    assert resumed.allow_unavailable
-    assert resumed.unavailable["changed"] == "legacy_revision_unavailable"
+    resumed = runtime.prepare("legacy", "owner", skill_ids=["good", "changed"])
+    assert resumed.unavailable["changed"] == "integrity_failed"
     assert (resumed.view_dir / "good" / "SKILL.md").is_file()
     assert not (resumed.view_dir / "changed").exists()
 
@@ -244,7 +264,7 @@ async def test_connector_disabled_midrun_never_calls_underlying_tool(local_skill
     async def list_tools():
         return [Tool()]
 
-    run = runtime.prepare("connector-disabled", "owner", skill_ids=[], allow_unavailable=True)
+    run = runtime.prepare("connector-disabled", "owner", skill_ids=[])
     run = replace(
         run,
         mcp_bindings={"one": {"install_id": "mcp:local-json:one", "authorization_checked": True}},

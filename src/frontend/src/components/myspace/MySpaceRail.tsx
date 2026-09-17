@@ -11,6 +11,7 @@ import {
 import type { KbTabKey, MySpaceTab } from '../../types';
 import { useMySpaceStore } from '../../stores/mySpaceStore';
 import { useCatalogStore, useEditionStore } from '../../stores';
+import { useKbTab } from '../../routing/subPages';
 import { t } from '../../i18n';
 
 const NAV_ITEMS: Array<{ key: MySpaceTab; label: string; icon: React.ReactNode }> = [
@@ -33,7 +34,7 @@ export function MySpaceRail() {
   const notifUnreadCount = useMySpaceStore((s) => s.notifUnreadCount);
   const openSearch = useMySpaceStore((s) => s.openSearch);
   const railCollapsed = useMySpaceStore((s) => s.railCollapsed);
-  const kbTab = useCatalogStore((s) => s.kbTab);
+  const kbTab = useKbTab();
   const setKbTab = useCatalogStore((s) => s.setKbTab);
   const multiTenancy = useEditionStore((s) => (s.loaded ? !!s.features.multi_tenancy : true));
   const isCE = useEditionStore((s) => s.edition === 'ce');

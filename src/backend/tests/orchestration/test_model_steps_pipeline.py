@@ -24,6 +24,7 @@ from core.llm.agentscope_hook_adapter import AgentScopeHookAdapter
 from core.llm.model_steps import assistant_row_replay
 from core.services.compaction_service import _normalize_rows
 from orchestration import chat_run_executor as executor
+from orchestration.memory_integration import SessionMemory
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -594,7 +595,7 @@ async def test_plan_bar_and_canonical_results_survive_workflow_and_persistence(
         )
 
     async def no_memory(*_args, **_kwargs):
-        return None
+        return SessionMemory(chat_id="", scope_user_id="", workspace_id="default", memory_enabled=False)
 
     async def no_identity(_user_id):
         return ""
@@ -616,7 +617,7 @@ async def test_plan_bar_and_canonical_results_survive_workflow_and_persistence(
     monkeypatch.setattr(builtin_subagents, "merge_builtin_subagents", lambda *_a, **_kw: [])
     monkeypatch.setattr(compaction_service, "maybe_run_pre_turn_compaction", no_compaction)
     monkeypatch.setattr(workflow, "create_agent_executor", create_agent)
-    monkeypatch.setattr(workflow, "launch_memory_retrieval", no_memory)
+    monkeypatch.setattr(workflow, "open_session_memory", no_memory)
     monkeypatch.setattr(workflow, "build_user_identity_block", no_identity)
     monkeypatch.setattr(workflow, "anchor_start_for_chat", lambda _chat_id: 0)
     monkeypatch.setattr(workflow, "enabled_skill_ids_from_context", lambda _ctx: [])

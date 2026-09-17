@@ -911,10 +911,10 @@ _persistent_clients: list = []
 
 
 from orchestration.memory_integration import (  # noqa: F401
-    build_frozen_memory_block,
     build_user_identity_block,
-    inject_frozen_memory,
-    launch_memory_retrieval,
+    inject_session_blocks,
+    open_session_memory,
+    resolve_session_memory,
     save_memories_background,
 )
 
@@ -1725,11 +1725,12 @@ async def _astream_subagent_direct(
         _mem0_enabled,
     )
 
-    _memory_task = await launch_memory_retrieval(
-        _mem0_scope_user_id,
-        user_message,
-        _mem0_enabled,
+    _session_memory = await open_session_memory(
+        chat_id=_mem0_chat_id,
+        scope_user_id=_mem0_scope_user_id,
         workspace_id=_mem0_workspace_id,
+        user_message=user_message,
+        memory_enabled=_mem0_enabled,
         # The retrieval budget is part of the orchestration profile: how long
         # this task type is willing to wait for memory is an assembly decision,
         # not a global constant. Resolved here because retrieval starts before
@@ -1815,27 +1816,13 @@ async def _astream_subagent_direct(
         # task 上下文不互通）
         attach_allocator(agent, _anchor_allocator)
 
-        # ── Frozen-block injection: user identity (always injected) + memory snapshot (loaded only when persistent memory is on) ───
-        _identity_block = await build_user_identity_block(_mem0_user_id)
-        frozen_block = ""
-        if _mem0_enabled:
-            frozen_block = await build_frozen_memory_block(
-                _mem0_scope_user_id,
-                _mem0_workspace_id,
-                _memory_task,
-                memory_enabled=_mem0_enabled,
-            )
-        else:
-            logger.debug(
-                "[subagent] memory load skipped: memory_enabled=False (user=%s)",
-                _mem0_user_id,
-            )
-        if frozen_block or _identity_block:
-            session_messages = await inject_frozen_memory(
-                frozen_block,
-                session_messages,
-                identity_block=_identity_block,
-            )
+        # ── Session-constant blocks: user identity + the chat's frozen memory
+        # snapshot (built on the first turn, replayed byte-for-byte after). ──
+        session_messages = await inject_session_blocks(
+            session_messages,
+            identity_block=await build_user_identity_block(_mem0_user_id),
+            memory_block=await resolve_session_memory(_session_memory),
+        )
 
         # The canonical ContextAssembler owns selection and truncation.  Feed
         # it the complete candidate set so every exclusion is visible in the
@@ -2345,7 +2332,7 @@ async def _astream_subagent_direct(
         user_id=str(context.get("user_id") or ""),
         objective=user_message,
         agent=streaming_agent,
-        memory_task=_memory_task,
+        memory_task=_session_memory.retrieval_task,
         latency_ms=None,
         memory_write_enabled=_mem0_write_enabled,
     )
@@ -2572,12 +2559,10 @@ async def astream_chat_workflow(
             context.get("skill_id"),
         )
 
-    # ── [memory] Retrieval launched as background task, NOT awaited here ──
-    # New non-blocking path: launch_memory_retrieval() returns a Task
-    # immediately; the actual result gets a short wait via
-    # asyncio.wait_for(timeout=0.05) inside build_frozen_memory_block(); if the
-    # budget is exceeded, Fact injection is skipped and only the L1 Profile is
-    # used. Never blocks the SSE first frame.
+    # ── [memory] Session memory opened here, never awaited on the SSE path ──
+    # First turn of a chat: retrieval starts as a background task so it overlaps
+    # agent assembly, and Fact injection is skipped if it blows its budget.
+    # Every later turn: the stored snapshot is replayed and no retrieval runs.
     _mem0_user_id = str(context.get("user_id", ""))
     _mem0_workspace_id = str(context.get("workspace_id", "") or "default")
     _mem0_chat_id = context.get("chat_id") or context.get("conversation_id")
@@ -2595,11 +2580,12 @@ async def astream_chat_workflow(
         _mem0_write_enabled,
     )
 
-    _memory_task = await launch_memory_retrieval(
-        _mem0_scope_user_id,
-        user_message,
-        _mem0_enabled,
+    _session_memory = await open_session_memory(
+        chat_id=_mem0_chat_id,
+        scope_user_id=_mem0_scope_user_id,
         workspace_id=_mem0_workspace_id,
+        user_message=user_message,
+        memory_enabled=_mem0_enabled,
         # The retrieval budget is part of the orchestration profile: how long
         # this task type is willing to wait for memory is an assembly decision,
         # not a global constant. Resolved here because retrieval starts before
@@ -2872,30 +2858,15 @@ async def astream_chat_workflow(
                 raise
             logger.warning("[workflow] pre-turn compaction failed: %s", _pt_exc)
 
-        # ── Frozen-block injection: user identity (always injected) + memory snapshot (loaded only when persistent memory is on) ──
-        # The L1 Profile always reads the DB (fast); L2 Facts are injected only
-        # if memory_task has already completed — otherwise this turn's Facts
-        # are dropped to protect first-frame latency.
-        _identity_block = await build_user_identity_block(_mem0_user_id)
-        frozen_block = ""
-        if _mem0_enabled:
-            frozen_block = await build_frozen_memory_block(
-                _mem0_scope_user_id,
-                _mem0_workspace_id,
-                _memory_task,
-                memory_enabled=_mem0_enabled,
-            )
-        else:
-            logger.debug(
-                "[workflow] memory load skipped: memory_enabled=False (user=%s)",
-                _mem0_user_id,
-            )
-        if frozen_block or _identity_block:
-            session_messages = await inject_frozen_memory(
-                frozen_block,
-                session_messages,
-                identity_block=_identity_block,
-            )
+        # ── Session-constant blocks: user identity + the chat's frozen memory
+        # snapshot. Built on the first turn (L1 profile always, L2 facts only if
+        # retrieval beat its budget), replayed byte-for-byte on every turn after,
+        # so this head of the message list never moves the prefix-cache boundary.
+        session_messages = await inject_session_blocks(
+            session_messages,
+            identity_block=await build_user_identity_block(_mem0_user_id),
+            memory_block=await resolve_session_memory(_session_memory),
+        )
 
         # The final request assembler receives the full post-compaction
         # candidate set.  It is the only budget selector, and records every
@@ -3559,7 +3530,7 @@ async def astream_chat_workflow(
         user_id=str(context.get("user_id") or ""),
         objective=user_message,
         agent=streaming_agent,
-        memory_task=_memory_task,
+        memory_task=_session_memory.retrieval_task,
         latency_ms=None,
         memory_write_enabled=_mem0_write_enabled,
     )

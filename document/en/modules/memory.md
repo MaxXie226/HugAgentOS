@@ -28,20 +28,31 @@ api/routes/v1/chats.py
   │
   ▼
 orchestration/workflow.py
-  ├─► launch_memory_retrieval()            ← background task, returns immediately
-  │     └─ core/memory/service.retrieve_memories()
-  │          ├─ mem0.Memory.search() → Milvus vector search
-  │          └─ core/memory/graph.py → optional Neo4j relation search
+  ├─► open_session_memory()                ← session-scoped: when this chat already
+  │     │                                     has a frozen block, **no search is issued**
+  │     └─ first turn only: launch_memory_retrieval() background task, returns immediately
+  │          └─ core/memory/service.retrieve_memories()
+  │               ├─ mem0.Memory.search() → Milvus vector search
+  │               └─ core/memory/graph.py → optional Neo4j relation search
   │
-  ├─► build_frozen_memory_block()          ← assembles the "session-frozen" block
+  ├─► resolve_session_memory()             ← later turns replay the stored snapshot;
+  │     │                                     only the first turn assembles a block
   │     · L1 profile: DB read, <20ms, always awaited
   │     · L2 procedures: awaits the retrieval task within a 600ms budget
   │       (MEMORY_RETRIEVAL_BUDGET_MS); timeout shields the background task,
   │       skips this injection, and leaves completion state observable
+  │     · stores the block on ChatSession.metadata once the read actually landed;
+  │       a timed-out or degraded read is not stored, so the next turn retries
+  │       rather than freezing an accidental blank for the whole chat
   │
-  ├─► inject_frozen_memory()               ← frozen block prepended to
-  │                                           session_messages as a user-role message
-  │     (user rather than system: models like Qwen require system only at index 0)
+  ├─► inject_session_blocks()              ← session-constant blocks (identity +
+  │                                           frozen memory) prepended to
+  │                                           session_messages as user-role messages
+  │     (user rather than system: models like Qwen require system only at index 0,
+  │      and keeping these per-user bytes out of the system prompt leaves the system
+  │      text, tool schemas and skill list a byte-identical shared prefix across
+  │      users and chats. Both blocks are constant for the whole chat, so sitting
+  │      ahead of the history never moves the prefix-cache boundary between turns)
   │
   ▼  … agent streams its response over SSE …
   │

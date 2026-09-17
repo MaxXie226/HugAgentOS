@@ -1,74 +1,87 @@
 """Applying a Windows sandbox plan at the moment a process is spawned.
 
-The Windows confinement cannot be expressed as an argv prefix — a token has to
-be built and handed to ``CreateProcessAsUser`` by whoever creates the process.
-So instead of a wrapper command, the backend hands the spawning boundary a
-*plan*, and this module turns that plan into a running process.
-
-Two design points are worth keeping:
-
-* **The plan is already decided.** The backend resolved the policy before
-  serializing it; nothing here re-derives access from a policy. Resolving on
-  both sides of the boundary would mean two copies of the same decision, and the
-  second copy is the one no test of the permission layer can see.
-* **Nothing here needs the policy model.** The runner imports this module once
-  at startup, but keeping its dependencies to the standard library and the
-  ``ctypes`` bindings is what lets the same module be reached from a short-lived
-  process too, if one is ever needed again.
-
-The plan is small:
+Windows confinement cannot be an argv prefix — a token has to be built and
+handed to ``CreateProcessAsUser`` by whoever creates the process — so the
+backend hands the spawning boundary a *plan*, already decided, and this module
+applies it verbatim:
 
 ``writable_roots``
-    Each an absolute path the command may write, with the paths inside it that
-    must stay read-only — the policy's own read-only entries and the protected
-    metadata names, already joined into one list.
+    Each an absolute path the command may write, with the existing paths inside
+    it that must stay read-only.
 ``scratch_dir``
-    The private directory that stands in for the user's temp folder, or absent
-    when the policy grants no scratch space. See
-    :func:`core.sandbox.oslayer.windows_token.scratch_directory` for why the
-    real temp folder is not used.
+    The private directory standing in for the user's temp folder; absent when
+    the policy grants no scratch space.
 ``state_dir``
-    Where the capability SIDs are remembered between runs.
+    Where the roots currently carrying the sandbox's label are remembered.
+
+A label is on-disk state that outlives the command, so a root stays labeled only
+while a plan names it: at every spawn, roots labeled by earlier plans and named
+by neither this plan nor a still-running command get their label taken back.
+That keeps a one-off grant one-off, as the per-run token does on other
+platforms.
 """
 
 from __future__ import annotations
 
+import json
 import os
+import threading
+from collections import Counter
 
 # Environment variables Windows programs read to find their temp directory.
 TEMP_ENV_KEYS = ("TEMP", "TMP")
+ROOTS_FILENAME = "sandbox_labeled_roots.json"
+
+_LOCK = threading.Lock()
+_IN_USE: Counter[str] = Counter()
+_TOKEN = None
 
 
-def apply_filesystem_grants(plan: dict) -> list:
-    """Write the ACEs that pair with the token; return the capability SIDs.
+def root_key(path: str) -> str:
+    return os.path.normcase(os.path.normpath(os.path.abspath(path)))
 
-    A grant on a writable root is inheritable, so the read-only paths inside it
-    get an explicit deny for the same SID afterwards. Deny entries are ordered
-    ahead of grants in the resulting ACL, so the narrower rule wins.
 
-    Read-only paths that do not exist yet are skipped: an ACE needs an object to
-    sit on, and there is no existing authority to protect at a path nothing has
-    created.
+class LabeledRoots:
+    """The roots currently carrying the sandbox's Low label, kept in ``state_dir``."""
+
+    def __init__(self, state_dir: str) -> None:
+        self._path = os.path.join(state_dir, ROOTS_FILENAME)
+
+    def load(self) -> set[str]:
+        try:
+            with open(self._path, encoding="utf-8") as handle:
+                data = json.load(handle)
+        except (OSError, ValueError):
+            return set()
+        return {str(item) for item in data} if isinstance(data, list) else set()
+
+    def save(self, roots: set[str]) -> None:
+        os.makedirs(os.path.dirname(self._path), exist_ok=True)
+        temporary = self._path + ".tmp"
+        with open(temporary, "w", encoding="utf-8") as handle:
+            json.dump(sorted(roots), handle, ensure_ascii=False, indent=2)
+        os.replace(temporary, self._path)
+
+
+def apply_labels(plan: dict) -> None:
+    """Label this plan's roots and take the label back from roots no plan needs.
+
+    Roots a still-running command was granted keep theirs until it exits.
     """
-    from .win32.acl import deny_write_access, grant_write_access
-    from .win32.caps import capability_sids_for_roots, readonly_capability_sid
+    from .win32.label import label_read_only, label_writable, remove_label
 
-    state_dir = plan["state_dir"]
-    roots = plan.get("writable_roots") or []
-    if not roots:
-        # A read-only plan still needs a restricting SID for the token to carry
-        # — one that is granted nowhere, so nothing becomes writable.
-        return [readonly_capability_sid(state_dir)]
-
-    paths = [root["path"] for root in roots]
-    sids = capability_sids_for_roots(state_dir, paths)
-    for root in roots:
-        sid = sids[root["path"]]
-        grant_write_access(root["path"], sid)
+    roots = {root_key(root["path"]): root for root in plan.get("writable_roots") or []}
+    store = LabeledRoots(plan["state_dir"])
+    labeled = store.load()
+    in_use = {key for key, count in _IN_USE.items() if count > 0}
+    stale = labeled - set(roots) - in_use
+    for key in stale:
+        remove_label(key)
+    for root in roots.values():
+        label_writable(root["path"])
         for read_only in root.get("read_only") or ():
-            if os.path.exists(read_only):
-                deny_write_access(read_only, sid)
-    return [sids[path] for path in paths]
+            label_read_only(read_only)
+    store.save((labeled - stale) | set(roots))
 
 
 def child_environment(plan: dict, env: dict) -> dict:
@@ -84,6 +97,21 @@ def child_environment(plan: dict, env: dict) -> dict:
     return {**env, **{key: scratch for key in TEMP_ENV_KEYS}}
 
 
+def _sandbox_token():
+    """The low-integrity token, built once: it takes nothing from the plan."""
+    global _TOKEN
+    if _TOKEN is None:
+        from .win32 import ffi
+        from .win32.token import create_low_integrity_token, open_current_process_token
+
+        base_token = open_current_process_token()
+        try:
+            _TOKEN = create_low_integrity_token(base_token)
+        finally:
+            ffi.CloseHandle(base_token)
+    return _TOKEN
+
+
 def spawn_confined(
     plan: dict,
     command: list,
@@ -94,42 +122,49 @@ def spawn_confined(
     stdout: int,
     stderr: int,
 ):
-    """Apply ``plan`` and start ``command`` under the restricted token it implies.
+    """Apply ``plan`` and start ``command`` under the low-integrity token.
 
     Returns a :class:`core.sandbox.oslayer.win32.spawn.TokenProcess`, which the
     caller must ``close()`` once it has read the exit code.
     """
-    from .win32 import ffi
     from .win32.spawn import spawn_with_token
-    from .win32.token import create_restricted_token, open_current_process_token
 
     scratch = plan.get("scratch_dir")
     if scratch:
         os.makedirs(scratch, exist_ok=True)
 
-    capability_sids = apply_filesystem_grants(plan)
-    base_token = open_current_process_token()
-    try:
-        token = create_restricted_token(base_token, capability_sids)
-    finally:
-        ffi.CloseHandle(base_token)
+    keys = [root_key(root["path"]) for root in plan.get("writable_roots") or []]
+
+    def release() -> None:
+        with _LOCK:
+            _IN_USE.subtract(keys)
+
+    with _LOCK:
+        apply_labels(plan)
+        token = _sandbox_token()
+        _IN_USE.update(keys)
     try:
         return spawn_with_token(
             token,
-            list(command),
+            command,
             cwd=cwd,
             env=child_environment(plan, env),
             stdin=stdin,
             stdout=stdout,
             stderr=stderr,
+            on_close=release,
         )
-    finally:
-        ffi.CloseHandle(token)
+    except BaseException:
+        release()
+        raise
 
 
 __all__ = [
+    "LabeledRoots",
+    "ROOTS_FILENAME",
     "TEMP_ENV_KEYS",
-    "apply_filesystem_grants",
+    "apply_labels",
     "child_environment",
+    "root_key",
     "spawn_confined",
 ]

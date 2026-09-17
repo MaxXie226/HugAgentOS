@@ -12,7 +12,8 @@ import type {
 import { loadChatStore, saveChatStoreDebounced, flushChatStore, nowId, newDraftChatId, isDraftChatId, isNewDraftChatId, userScopedKey, purgeLegacyUnscopedKeys, mergeChatStores, registerDeletedChatId, setStreamingIdsProvider, subscribeChatStoreChanges, STORAGE_KEY, writeLocal, removeLocal } from '../storage';
 import { usePageConfigStore } from './pageConfigStore';
 import { usePluginStore } from './pluginStore';
-import { loadActiveProjectId } from './projectSession';
+import { activeProjectId } from './projectSession';
+import { chatIdFromPath, isHomePath, navigateTo, pathForChat, setChatPathResolver } from '../routing/navigation';
 import { t } from '../i18n';
 import { resolveModeSlug, resolvePlanModeActive } from '../utils/chatMode';
 import type { ChatCommand } from '../utils/projectCommands';
@@ -74,23 +75,7 @@ export function isTurboMode(mode: ChatMode): boolean {
   return mode === 'turbo';
 }
 
-const CURRENT_CHAT_KEY = 'hugagent_current_chat_id';
 const PENDING_SCROLL_MESSAGE_TS_KEY = 'hugagent_pending_scroll_message_ts';
-
-function loadCurrentChatId(userId: string | null | undefined) {
-  if (typeof window === 'undefined') return nowId('chat');
-  const key = userScopedKey(CURRENT_CHAT_KEY, userId);
-  if (!key) return nowId('chat');
-  // 标签页私有优先：sessionStorage 与本标签页同生共死（浏览器"复制标签页"会带
-  // 一份副本，恰好落在同一会话上）。多个标签页各自恢复自己的会话，不再共抢
-  // localStorage 里的单一指针互相覆盖（问题17 串台的一环）；localStorage 只作为
-  // 新开标签页的兜底。
-  try {
-    const tabLocal = window.sessionStorage.getItem(key);
-    if (tabLocal) return tabLocal;
-  } catch { /* sessionStorage 不可用时退回 localStorage */ }
-  return window.localStorage.getItem(key) || newDraftChatId(userId);
-}
 
 /** 这段对话只在浏览器里存在、服务端还没有：登记过是本地草稿、不在服务端会话列表里、
  *  本地也一条消息都没有。三条同时成立才算 —— 任何一条不成立都退回原来的行为（照常
@@ -105,12 +90,21 @@ export function isLocalDraftChat(chatId: string): boolean {
   return isDraftChatId(s.currentUserId, chatId);
 }
 
-function saveCurrentChatId(userId: string | null | undefined, chatId: string) {
-  if (typeof window === 'undefined') return;
-  const key = userScopedKey(CURRENT_CHAT_KEY, userId);
-  if (!key) return;
-  try { window.sessionStorage.setItem(key, chatId); } catch { /* ignore */ }
-  writeLocal(key, chatId);
+/** 定时任务的虚拟条目不是一段会话。 */
+function isAutomationEntry(chatId: string): boolean {
+  return chatId.startsWith('automation:');
+}
+
+/** 这段会话配不配拥有自己的地址。判定要正面证据——服务端有它、它在左侧历史列表里、
+ *  或者它已经有消息。不能反过来问「它是不是一段已登记的本地草稿」：草稿名单存在浏览器
+ *  里且有数量上限，新建对话多了旧 id 会被挤掉，一被挤掉，一段空白的新对话就会被误判成
+ *  正式会话写进地址（新对话页变成 /c/<草稿id>）。 */
+export function isAddressableChat(chatId: string): boolean {
+  if (!chatId || isAutomationEntry(chatId)) return false;
+  const s = useChatStore.getState();
+  return s.backendSessionIds.has(chatId)
+    || (s.store.order || []).includes(chatId)
+    || (s.store.chats[chatId]?.messages?.length ?? 0) > 0;
 }
 
 function loadPendingScrollMessageTs(userId: string | null | undefined) {
@@ -318,7 +312,10 @@ interface ChatState {
   // ── Actions ──
   setStore: (store: ChatStoreData) => void;
   updateStore: (updater: (prev: ChatStoreData) => ChatStoreData) => void;
+  /** 切到某段会话，并把地址栏推到 `/c/<会话id>`。 */
   setCurrentChatId: (id: string) => void;
+  /** 同上，但不改地址栏——供路由把「地址 → 状态」这一方向同步回来（前进 / 后退）。 */
+  adoptChatFromUrl: (id: string) => void;
   setInput: (input: string) => void;
   /** First message pending send across panels (project-page input box → chat panel auto-send).
    *  Once set, an effect in App.tsx consumes it when currentChatId matches, then clears it. */
@@ -459,9 +456,30 @@ export const useChatStore = create<ChatState>((set, get) => {
     if (!isHybridDual() || !isNewDraftChatId(chatId) || !isLocalDraftChat(chatId) || isRegisteredLocalChat(chatId)
         || chat?.projectId || chat?.runTarget
         || (!newlyCreated && state.store.order.includes(chatId))) return;
-    if (loadActiveProjectId()) return;
+    if (activeProjectId()) return;
     state.setChatRunTarget(chatId, 'local');
   };
+  const syncChatUrl = (chatId: string, opts?: { replace?: boolean }) => {
+    if (isAutomationEntry(chatId)) return;
+    navigateTo(pathForChat(isAddressableChat(chatId) ? chatId : null), opts);
+  };
+  /** 草稿发出第一条消息就有了历史记录 → 地址从首页换成它自己的 `/c/<会话id>`。
+   *  挂在写库之后而不是各个发送入口：普通 / 计划 / 自主循环三条发送路径各记一次，
+   *  迟早会漏（事实上第一版就漏了计划模式那条）。
+   *  用 replace：后退键该回到上一段对话，而不是回到刚刚那段空白草稿。
+   *
+   *  **只在首页才升级**。流式输出期间每来一段文字就写一次库，如果条件写成「地址上
+   *  没有会话 id」，用户切到我的空间、设置等任何别的页面都满足这个条件，下一帧就会
+   *  被拽回会话——多开几段会话时尤其明显。首页是唯一「该有地址却还没有」的位置。 */
+  const publishCurrentChatUrl = () => {
+    if (!isHomePath()) return;
+    const id = get().currentChatId;
+    if (isAddressableChat(id)) navigateTo(pathForChat(id), { replace: true });
+  };
+  setChatPathResolver(() => {
+    const id = get().currentChatId;
+    return pathForChat(isAddressableChat(id) ? id : null);
+  });
   // 合并写盘时：本标签页正在流式输出的会话一律以本内存版本为准
   setStreamingIdsProvider(() => get().sendingChatIds);
   return ({
@@ -518,16 +536,21 @@ export const useChatStore = create<ChatState>((set, get) => {
     set({ store, storeRef: store });
     saveChatStoreDebounced(get().currentUserId, store);
     initializeDraftRunTarget(get().currentChatId);
+    publishCurrentChatUrl();
   },
   updateStore: (updater) => {
     const next = updater(get().store);
     set({ store: next, storeRef: next });
     saveChatStoreDebounced(get().currentUserId, next);
     initializeDraftRunTarget(get().currentChatId);
+    publishCurrentChatUrl();
   },
   setCurrentChatId: (id) => {
+    get().adoptChatFromUrl(id);
+    syncChatUrl(id);
+  },
+  adoptChatFromUrl: (id) => {
     initializeDraftRunTarget(id);
-    saveCurrentChatId(get().currentUserId, id);
     const chat = get().store.chats[id];
     // activePlugin is global state but semantically belongs to the "current chat". On chat switch,
     // recompute it for the target chat: only site-building chats (siteChat) reference the "sites"
@@ -985,7 +1008,7 @@ export const useChatStore = create<ChatState>((set, get) => {
     };
     set({ store: next, storeRef: next });
     saveChatStoreDebounced(currentUserId, next);
-    saveCurrentChatId(currentUserId, targetId);
+    syncChatUrl(targetId);
     set({
       currentChatId: targetId,
       planMode: planChat,
@@ -1074,7 +1097,7 @@ export const useChatStore = create<ChatState>((set, get) => {
     };
     set({ store: next, storeRef: next });
     saveChatStoreDebounced(currentUserId, next);
-    saveCurrentChatId(currentUserId, targetId);
+    syncChatUrl(targetId);
     set({
       currentChatId: targetId,
       planMode: false,
@@ -1098,7 +1121,7 @@ export const useChatStore = create<ChatState>((set, get) => {
 
   newChat: () => {
     const id = newDraftChatId(get().currentUserId);
-    saveCurrentChatId(get().currentUserId, id);
+    syncChatUrl(id);
     set({
       currentChatId: id,
       input: '',
@@ -1152,7 +1175,7 @@ export const useChatStore = create<ChatState>((set, get) => {
     if (currentChatId === id) {
       const newId = next.order[0] || newDraftChatId(currentUserId);
       const nextChat = next.chats[newId];
-      saveCurrentChatId(currentUserId, newId);
+      syncChatUrl(newId);
       set({
         currentChatId: newId,
         planMode: resolvePlanModeActive(nextChat),
@@ -1201,7 +1224,8 @@ export const useChatStore = create<ChatState>((set, get) => {
     // so they can't be observed by anyone after this point.
     purgeLegacyUnscopedKeys();
     const store = loadChatStore(userId);
-    const currentChatId = loadCurrentChatId(userId);
+    // 「当前开着哪段会话」的真源是地址栏；地址上没有会话 id（首页 `/`）就是一段新草稿
+    const currentChatId = chatIdFromPath() || newDraftChatId(userId);
     const pendingScroll = loadPendingScrollMessageTs(userId);
     set({
       currentUserId: userId,

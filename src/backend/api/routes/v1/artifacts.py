@@ -99,29 +99,9 @@ def _run_backfill_once(user_id: str) -> None:
             _backfilling_users.discard(user_id)
 
 
-# 读时对账：列「我的空间」之前先把沙箱镜像目录里新落盘的文件登记上，并把界面上已删的
-# 文件从镜像里清掉。沙箱写文件到 /myspace 是随时发生的，只在 bash 结束时对账仍会让用户
-# 在长命令跑到一半时看到过期视图 —— 读时再对一次，用户任何时候打开看到的都是当下状态。
-# 这里只登记"新文件"，不碰"改动了用户已有文件"那一类：那类要过写入确认门，HTTP 读路径
-# 没有确认通道，留给 bash 工具处理。
-_mirror_reconcile_lock = threading.Lock()
-_mirror_reconciling: set = set()
-
-
-def _reconcile_mirror_on_read(user_id: str) -> None:
-    with _mirror_reconcile_lock:
-        if user_id in _mirror_reconciling:
-            return  # 并发轮询只让一个进去，其余直接读当前已提交的结果
-        _mirror_reconciling.add(user_id)
-    try:
-        from core.llm.tools import myspace_mirror as mirror
-
-        mirror.reconcile_on_read(user_id=user_id)
-    except Exception as exc:  # noqa: BLE001 — 对账失败不该让列表打不开
-        logger.warning("[myspace-mirror] 读时对账失败 user=%s: %s", user_id, exc)
-    finally:
-        with _mirror_reconcile_lock:
-            _mirror_reconciling.discard(user_id)
+# 列「我的空间」之前先催一下登记器：沙箱写文件是随时发生的，去抖窗口里刚落盘的那几个
+# 不该等到下次刷新才出现。催的是同一个登记器（core.myspace.watcher），不是另开一条对账
+# 路径 —— 登记在哪儿发生、按什么判据发生，都还是它说了算。
 
 
 class AddArtifactToKBRequest(BaseModel):
@@ -466,8 +446,9 @@ async def list_user_artifacts(
         task.add_done_callback(_backfill_tasks.discard)
 
     if scope != "all":
-        # 文件 IO + 可能的对象存储下载，丢到线程里做，别卡住事件循环
-        await asyncio.to_thread(_reconcile_mirror_on_read, uid)
+        from core.myspace.watcher import flush_user
+
+        await flush_user(uid)
 
     repo = ArtifactRepository(db)
     mime_prefix = None

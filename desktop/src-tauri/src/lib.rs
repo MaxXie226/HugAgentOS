@@ -35,40 +35,42 @@ use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut,
 use tauri_plugin_opener::OpenerExt;
 use tokio::sync::RwLock;
 
-/// Keep this value identical for every WebView2 window in the process. Fractional Windows DPI
-/// scaling makes WebView2 return inconsistent sub-pixel coordinates to Ant Design's popup
-/// positioning code, which can place dropdowns far outside the visible window. Pinning the device
-/// scale to an integer fixes the coordinates; `apply_display_zoom` restores the expected visual
-/// size afterwards.
-pub(crate) const WEBVIEW_BROWSER_ARGS: &str = "--force-device-scale-factor=1";
-
-/// 根据系统 DPI 与当前显示器物理分辨率共同计算 WebView 缩放。
+/// 「视图 → 放大 / 缩小」的缩放档位，与主流浏览器一致。
 ///
-/// 远程桌面（尤其 Mac Retina → Windows）可能报告「高 DPI + 较低虚拟分辨率」。若直接把
-/// `scale_factor` 当 zoom，会把页面和图标二次放大。这里以 2560×1440 为缩放基准，并把
-/// 最大 zoom 限制为 1.5：1080p 远程桌面保持 1.0，4K 本地屏最多使用 1.5。
-fn adaptive_display_zoom(scale_factor: f64, width: u32, height: u32) -> f64 {
-    let safe_scale = if scale_factor.is_finite() {
-        scale_factor.clamp(1.0, 1.5)
-    } else {
-        1.0
-    };
-    let resolution_cap = ((width as f64 / 2560.0).min(height as f64 / 1440.0)).clamp(1.0, 1.5);
-    safe_scale.min(resolution_cap)
-}
+/// 系统 DPI 缩放由 WebView 自己按平台原生处理，壳层不再干预（历史上曾用
+/// `--force-device-scale-factor=1` 关掉系统缩放再自行补偿，那会让 150% 等常见档位整体缩水，
+/// 已移除）。因此这里的值就是用户自己的放大/缩小意愿，1.0 表示「实际大小」。
+pub(crate) const ZOOM_STEPS: [f64; 13] = [
+    0.5, 0.67, 0.75, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0,
+];
 
-/// Windows needs to restore the WebView2 DPI scaling removed by
-/// `--force-device-scale-factor=1`. Native WebViews on macOS and Linux already
-/// apply the system scale factor, so another page zoom would double-scale HiDPI UI.
-fn display_zoom_for_platform(is_windows: bool, scale_factor: f64, width: u32, height: u32) -> f64 {
-    if is_windows {
-        adaptive_display_zoom(scale_factor, width, height)
-    } else {
-        1.0
+/// 默认缩放：跟随系统，不额外放大。
+pub(crate) const DEFAULT_ZOOM: f64 = 1.0;
+const ZOOM_MIN: f64 = ZOOM_STEPS[0];
+const ZOOM_MAX: f64 = ZOOM_STEPS[ZOOM_STEPS.len() - 1];
+
+/// 把外部来源的缩放值归一到合法范围：未设置过或不是有限数都回到「实际大小」。
+/// prefs.json 可能被手工改过，归一化只放在这一处，读写两侧都经由它。
+pub(crate) fn sanitize_zoom(value: Option<f64>) -> f64 {
+    match value {
+        Some(zoom) if zoom.is_finite() => zoom.clamp(ZOOM_MIN, ZOOM_MAX),
+        _ => DEFAULT_ZOOM,
     }
 }
 
-/// 主窗口初始尺寸同样按显示器的逻辑分辨率计算，避免远程会话中 1280×860 逻辑像素
+/// 从当前缩放跳到相邻档位：`delta > 0` 放大、`delta < 0` 缩小，到头停在端点。
+/// 当前值不在档位表里（历史配置）时先就近归位再走一步。
+pub(crate) fn stepped_zoom(current: f64, delta: i32) -> f64 {
+    let index = ZOOM_STEPS
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| (*a - current).abs().total_cmp(&(*b - current).abs()))
+        .map_or(0, |(index, _)| index as i32);
+    let next = (index + delta).clamp(0, ZOOM_STEPS.len() as i32 - 1);
+    ZOOM_STEPS[next as usize]
+}
+
+/// 主窗口初始尺寸按显示器的逻辑分辨率计算，避免远程会话中 1280×860 逻辑像素
 /// 被高 DPI 放大后超出可用桌面。
 fn adaptive_window_dimensions(
     physical_width: u32,
@@ -104,24 +106,55 @@ fn main_window_dimensions(app: &tauri::AppHandle) -> (f64, f64, f64, f64) {
         .unwrap_or((1280.0, 860.0, 960.0, 640.0))
 }
 
-/// Compensate for the forced WebView2 scale on Windows. Keep native WebViews
-/// at page zoom 1.0 so their system HiDPI scaling is not applied twice.
-pub(crate) fn apply_display_zoom(window: &tauri::WebviewWindow) {
-    let scale_factor = window.scale_factor().unwrap_or(1.0);
-    let monitor_size = window
-        .current_monitor()
-        .ok()
-        .flatten()
-        .map(|monitor| *monitor.size())
-        .or_else(|| window.inner_size().ok())
-        .unwrap_or(tauri::PhysicalSize::new(1920, 1080));
-    let zoom = display_zoom_for_platform(
-        cfg!(target_os = "windows"),
-        scale_factor,
-        monitor_size.width,
-        monitor_size.height,
-    );
-    let _ = window.set_zoom(zoom);
+/// 当前生效的缩放档位。真值是 prefs.json，`Shared` 里存一份运行时副本：
+/// 页面每次加载完成、以及 Ctrl+滚轮连续缩放时都要取它，不该每次都去读盘。
+fn current_zoom(app: &tauri::AppHandle) -> f64 {
+    f64::from_bits(
+        app.state::<Shared>()
+            .ui_zoom
+            .load(std::sync::atomic::Ordering::Relaxed),
+    )
+}
+
+/// 导航 / 刷新会让 WebView2 丢掉页面缩放，加载完成后按用户档位重新施加。
+/// 主窗口和快速问答窗都会被 `navigate_session_windows` 整页导航，两边都要挂。
+fn restore_zoom_on_load(
+    window: tauri::WebviewWindow,
+    payload: tauri::webview::PageLoadPayload<'_>,
+) {
+    if matches!(payload.event(), PageLoadEvent::Finished) {
+        apply_user_zoom(&window);
+    }
+}
+
+/// 施加用户在「视图」菜单里选择的缩放档位。系统 DPI 由 WebView 原生处理，这里不参与，
+/// 所以未设置过时就是 1.0（= 完全跟随系统显示设置）。
+pub(crate) fn apply_user_zoom(window: &tauri::WebviewWindow) {
+    let _ = window.set_zoom(current_zoom(window.app_handle()));
+}
+
+/// 改变缩放档位并落盘，让所有承载内容的窗口与下次启动保持一致。
+/// `delta` 为 0 表示回到「实际大小」。
+pub(crate) fn adjust_user_zoom(app: &tauri::AppHandle, delta: i32) {
+    let zoom = if delta == 0 {
+        DEFAULT_ZOOM
+    } else {
+        stepped_zoom(current_zoom(app), delta)
+    };
+    let config_dir = {
+        let shared = app.state::<Shared>();
+        shared
+            .ui_zoom
+            .store(zoom.to_bits(), std::sync::atomic::Ordering::Relaxed);
+        shared.config_dir.clone()
+    };
+    // 落盘交给阻塞线程池：Ctrl+滚轮会连续触发，主线程不该等磁盘。
+    tauri::async_runtime::spawn_blocking(move || prefs::save_ui_zoom(&config_dir, zoom));
+    for window in app.webview_windows().values() {
+        if is_session_window(window.label()) {
+            let _ = window.set_zoom(zoom);
+        }
+    }
 }
 
 /// 跨组件共享的运行时状态（经 Tauri manage 注入）。
@@ -132,6 +165,8 @@ pub(crate) struct Shared {
     pub(crate) http: reqwest::Client,
     pub(crate) port: u16,
     pub(crate) config_dir: std::path::PathBuf,
+    /// 当前缩放档位（`f64` 的位表示）。真值仍是 prefs.json，这里是运行时副本。
+    pub(crate) ui_zoom: std::sync::atomic::AtomicU64,
     pub(crate) local_server: Arc<local_server::LocalServerManager>,
     /// 混合架构（Dual）：会话 cookie 名 + 桥接秘密 + 已编码的云端用户（供反代注入）。
     pub(crate) cookie_name: String,
@@ -263,16 +298,6 @@ pub fn run() {
         // macOS 遵循平台习惯：红色关闭按钮只隐藏主窗口并继续驻留后台，退出由系统
         // 菜单或托盘显式执行。其他平台首次关闭时仍弹出自定义确认窗，可记住后续行为。
         .on_window_event(|window, event| {
-            // RDP/ToDesk 调整分辨率、或把窗口移到不同 DPI 的显示器时重新计算 zoom。
-            // `set_zoom` 不改变外窗尺寸，因此处理 Resized 不会形成窗口 resize 循环。
-            if matches!(
-                event,
-                tauri::WindowEvent::ScaleFactorChanged { .. } | tauri::WindowEvent::Resized(_)
-            ) {
-                if let Some(webview) = window.app_handle().get_webview_window(window.label()) {
-                    apply_display_zoom(&webview);
-                }
-            }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if !is_desktop_window(window.label()) {
                     return;
@@ -459,6 +484,9 @@ pub fn run() {
 
             let web_dir = resolve_web_dir(app);
 
+            // 标题栏缩放动作：webview fetch → 反代 → 这里的 channel → 主线程施加。
+            let (zoom_tx, mut zoom_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+
             // 同步起反代拿到端口（仅绑定 + 后台 spawn，很快返回）。
             let pstate = proxy::ProxyState {
                 http: http.clone(),
@@ -472,6 +500,7 @@ pub fn run() {
                 cloud_server_base: cfg.cloud_base(),
                 local_base: local_server::local_server_base(),
                 hybrid_local,
+                zoom_tx,
                 bridge_secret: bridge_secret.clone(),
                 bridge_user: bridge_user.clone(),
                 bridge_sync: bridge_sync.clone(),
@@ -480,12 +509,24 @@ pub fn run() {
             let port = tauri::async_runtime::block_on(proxy::serve(pstate, web_dir))
                 .expect("启动本地反代失败");
 
+            // 复用菜单的动作分发：动作 id → 档位变化只在 menu.rs 定义一处。
+            let zoom_app = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                while let Some(action) = zoom_rx.recv().await {
+                    let app = zoom_app.clone();
+                    let _ = zoom_app.run_on_main_thread(move || menu::dispatch(&app, &action));
+                }
+            });
+
             app.manage(Shared {
                 server_base: cfg.server_base.clone(),
                 update_base: cfg.update_base(),
                 token: token.clone(),
                 http: http.clone(),
                 port,
+                ui_zoom: std::sync::atomic::AtomicU64::new(
+                    sanitize_zoom(prefs::load_ui_zoom(&config_dir)).to_bits(),
+                ),
                 config_dir: config_dir.clone(),
                 local_server: local_server.clone(),
                 cookie_name: cfg.cookie_name.clone(),
@@ -621,6 +662,12 @@ pub(crate) fn is_desktop_window(label: &str) -> bool {
         })
 }
 
+/// 承载应用内容、需要跟随会话导航与用户缩放的窗口：主窗口及其副本 + 快速问答窗。
+/// 确认弹窗、更新进度这类固定尺寸小窗不算在内。
+pub(crate) fn is_session_window(label: &str) -> bool {
+    is_desktop_window(label) || label == "quickask"
+}
+
 pub(crate) fn active_desktop_label(app: &tauri::AppHandle) -> String {
     let windows = app.webview_windows();
     windows
@@ -638,7 +685,7 @@ pub(crate) fn active_desktop_label(app: &tauri::AppHandle) -> String {
 
 fn navigate_session_windows(app: &tauri::AppHandle, url: &str) {
     for window in app.webview_windows().values() {
-        if is_desktop_window(window.label()) || window.label() == "quickask" {
+        if is_session_window(window.label()) {
             let destination = if window.label() == "quickask" && url == app.state::<Shared>().home_url() {
                 format!("{url}?quickask=1")
             } else {
@@ -715,7 +762,6 @@ fn toggle_quickask(app: &tauri::AppHandle) {
     };
     let _ = WebviewWindowBuilder::new(app, "quickask", WebviewUrl::External(parsed))
         .title(format!("{} · 快速问答", brand::NAME))
-        .additional_browser_args(WEBVIEW_BROWSER_ARGS)
         // 关掉 webview 内建的拖放拦截：它会吞掉 OS 文件拖入，页面收不到带
         // File 对象的 HTML5 drop 事件，输入框的拖拽上传（useFileDropZone）失效
         .disable_drag_drop_handler()
@@ -725,8 +771,9 @@ fn toggle_quickask(app: &tauri::AppHandle) {
         .skip_taskbar(true)
         .center()
         .focused(true)
+        .on_page_load(restore_zoom_on_load)
         .build()
-        .map(|window| apply_display_zoom(&window));
+        .map(|window| apply_user_zoom(&window));
 }
 
 /// 在主窗口打开「设置服务器地址」页。独立 WebView 小窗在部分 Windows/WebView2 环境下
@@ -808,7 +855,6 @@ fn open_close_confirm(app: &tauri::AppHandle, target_label: &str) {
     let target_label = target_label.to_string();
     let _ = WebviewWindowBuilder::new(app, "close-confirm", WebviewUrl::External(parsed))
         .title(brand::NAME)
-        .additional_browser_args(WEBVIEW_BROWSER_ARGS)
         .inner_size(460.0, 250.0)
         .resizable(false)
         .minimizable(false)
@@ -875,8 +921,7 @@ fn open_close_confirm(app: &tauri::AppHandle, target_label: &str) {
             });
             false
         })
-        .build()
-        .map(|window| apply_display_zoom(&window));
+        .build();
 }
 
 /// 创建主窗口，并挂导航守卫：只放行本地反代 / Tauri 内部源，其余外部跳转
@@ -889,7 +934,6 @@ fn build_window(app: &tauri::AppHandle, label: &str, url: &str) -> tauri::Result
 
     let builder = WebviewWindowBuilder::new(app, label, WebviewUrl::External(parsed))
         .title(brand::NAME)
-        .additional_browser_args(WEBVIEW_BROWSER_ARGS)
         // 同 quickask：禁用内建拖放拦截，HTML5 drop 事件才能携带文件进到页面
         .disable_drag_drop_handler()
         .inner_size(width, height)
@@ -908,6 +952,7 @@ fn build_window(app: &tauri::AppHandle, label: &str, url: &str) -> tauri::Result
     let builder = builder.decorations(false);
 
     let window = builder
+        .on_page_load(restore_zoom_on_load)
         .on_navigation(move |u| {
             let scheme = u.scheme();
             // Tauri 内部 / 数据类源放行。
@@ -1210,7 +1255,7 @@ fn build_window(app: &tauri::AppHandle, label: &str, url: &str) -> tauri::Result
         })
         .build()?;
 
-    apply_display_zoom(&window);
+    apply_user_zoom(&window);
 
     // macOS application menus belong in the system menu bar. Windows/Linux use
     // the in-window menu injected by proxy.rs to avoid a second chrome row.
@@ -1340,21 +1385,46 @@ mod display_tests {
     use super::*;
 
     #[test]
-    fn remote_retina_dpi_is_capped_by_virtual_resolution() {
-        assert_eq!(display_zoom_for_platform(true, 2.0, 1920, 1080), 1.0);
-        assert_eq!(display_zoom_for_platform(true, 1.5, 2560, 1440), 1.0);
+    fn zoom_steps_walk_the_preset_ladder() {
+        assert_eq!(stepped_zoom(1.0, 1), 1.1);
+        assert_eq!(stepped_zoom(1.1, 1), 1.25);
+        assert_eq!(stepped_zoom(1.0, -1), 0.9);
+        assert_eq!(stepped_zoom(0.9, -1), 0.8);
     }
 
     #[test]
-    fn high_resolution_display_gets_moderate_zoom() {
-        assert_eq!(display_zoom_for_platform(true, 2.0, 3840, 2160), 1.5);
-        assert_eq!(display_zoom_for_platform(true, 1.25, 3840, 2160), 1.25);
+    fn zoom_steps_stop_at_both_ends() {
+        assert_eq!(stepped_zoom(3.0, 1), 3.0);
+        assert_eq!(stepped_zoom(0.5, -1), 0.5);
+    }
+
+    /// 历史 prefs.json 里可能留着不在档位表上的值（旧版本按 DPI 算出来的补偿值），
+    /// 放大 / 缩小要能从那里就近接上，而不是卡住不动。
+    #[test]
+    fn off_ladder_zoom_snaps_to_the_nearest_step() {
+        assert_eq!(stepped_zoom(1.45, 1), 1.75);
+        assert_eq!(stepped_zoom(1.45, -1), 1.25);
+    }
+
+    /// prefs.json 是可以被手工改坏的，归一化统一挡在读取这一层。
+    #[test]
+    fn sanitize_zoom_falls_back_and_clamps() {
+        assert_eq!(sanitize_zoom(None), 1.0);
+        assert_eq!(sanitize_zoom(Some(f64::NAN)), 1.0);
+        assert_eq!(sanitize_zoom(Some(f64::INFINITY)), 1.0);
+        assert_eq!(sanitize_zoom(Some(-4.0)), 0.5);
+        assert_eq!(sanitize_zoom(Some(99.0)), 3.0);
+        assert_eq!(sanitize_zoom(Some(1.25)), 1.25);
     }
 
     #[test]
-    fn native_webviews_do_not_get_a_second_hidpi_zoom() {
-        assert_eq!(display_zoom_for_platform(false, 2.0, 3024, 1964), 1.0);
-        assert_eq!(display_zoom_for_platform(false, 2.0, 3840, 2160), 1.0);
+    fn session_windows_cover_main_copies_and_quickask() {
+        for label in ["main", "main-3", "quickask"] {
+            assert!(is_session_window(label), "{label}");
+        }
+        for label in ["close-confirm", "update-progress", "server-config"] {
+            assert!(!is_session_window(label), "{label}");
+        }
     }
 
     #[test]

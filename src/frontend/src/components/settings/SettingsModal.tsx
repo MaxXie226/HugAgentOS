@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
 import {
   Alert, Modal, Switch, Button, Tag, Slider, message, Tabs, Empty, Input, Select,
   Skeleton, Spin, Tooltip,
@@ -44,6 +44,8 @@ import { FactsList } from '../memory/FactsList';
 import { MemoryGraphView } from '../memory/MemoryGraphView';
 import { OntologyManager } from '../ontology';
 import { getLang, setLang, t, type Lang } from '../../i18n';
+import { navigateTo, pathForPanel } from '../../routing/navigation';
+import { useSettingsSection } from '../../routing/subPages';
 import type { ThemeMode } from '../../theme';
 
 interface SectionDef {
@@ -242,7 +244,12 @@ export default function SettingsPage() {
   const [messageApi, contextHolder] = message.useMessage();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const dragStartRef = useRef<{ x: number; y: number; offsetX: number; offsetY: number } | null>(null);
-  const [activeSection, setActiveSection] = useState<string>('profile');
+  // 子菜单也是一页：地址是 `/settings/<子菜单>`，可分享、刷新回到原处
+  const activeSection = useSettingsSection('profile');
+  const setActiveSection = useCallback(
+    (id: string) => navigateTo(pathForPanel('settings', id)),
+    [],
+  );
   const [passwordModalOpen, setPasswordModalOpen] = useState(false);
   const [memoryTab, setMemoryTab] = useState('profile');
   // Switch optimistic-update rollback on failure → shake the corresponding row once

@@ -6,7 +6,6 @@ import { useChatStore } from './chatStore';
 import { useAutomationChatStore } from './automationChatStore';
 import { writeLocal, removeLocal } from '../storage';
 
-export const LOGIN_LANDING_KEY = 'hugagent_login_landing';
 // Desktop client plan B: the system browser opens `<web>/?desktop=1` to start login;
 // this flag survives the SSO round trip in sessionStorage (kept for the whole tab
 // lifetime). After a successful login it is used to hand the session over to the
@@ -50,10 +49,26 @@ function isMockLoginUrl(url?: string | null): boolean {
   return !value || value.includes('/mock-sso/login');
 }
 
+/** 登录完该回到哪一页。 */
+function currentReturnPath(): string {
+  return window.location.pathname + window.location.search;
+}
+
 function fallbackLoginUrl(): string {
   if (SSO_LOGIN_URL && !isMockLoginUrl(SSO_LOGIN_URL)) return SSO_LOGIN_URL;
-  const origin = window.location.origin;
-  return `${origin}/mock-sso/login?redirect=${encodeURIComponent(window.location.pathname + window.location.search)}`;
+  return `${window.location.origin}${withReturnPath('/mock-sso/login')}`;
+}
+
+/** 服务端 401 给回来的登录地址是裸的 `/login`。带上当前地址，登录完能回到原来那一页
+ *  ——会话链接（`/c/<会话id>`）发给同事、对方没登录时，这一步决定他登录后是落回那段
+ *  对话还是掉到首页。登录页本就支持 `?redirect=`，且后端只取其中的路径部分。
+ *  外部 SSO 的授权地址自带 state/nonce，原样不动。 */
+function withReturnPath(url: string): string {
+  if (!url.startsWith('/')) return url;
+  const parsed = new URL(url, window.location.origin);
+  if (parsed.searchParams.has('redirect')) return url;
+  parsed.searchParams.set('redirect', currentReturnPath());
+  return `${parsed.pathname}${parsed.search}`;
 }
 
 /** Resolve the redirect-to-login URL.
@@ -61,7 +76,7 @@ function fallbackLoginUrl(): string {
  * 3) `SSO_LOGIN_URL` env / mock-SSO landing.
  */
 async function resolveLoginUrl(serverUrl?: string | null): Promise<string> {
-  if (serverUrl && !isMockLoginUrl(serverUrl)) return serverUrl;
+  if (serverUrl && !isMockLoginUrl(serverUrl)) return withReturnPath(serverUrl);
 
   if (!authorizeUrlPromise) {
     authorizeUrlPromise = getSsoAuthorizeUrl().catch(() => undefined);
@@ -332,7 +347,6 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           const user = await exchangeSsoCredential(credentialBody);
           // Desktop: after a successful login, hand the session over to the App and stay in the bridging state (authChecking stays true, keeping the spinner).
           if (await bridgeToDesktop()) return;
-          window.sessionStorage.setItem(LOGIN_LANDING_KEY, '1');
           set({ authUser: user, authChecking: false, wasAuthed: true });
           return;
         } catch (error) {

@@ -2,6 +2,8 @@ import { DesktopUpdateEntry } from '../../desktop/DesktopUpdateEntry';
 import { useDesktopUpdateStatus } from '../../desktop/useDesktopUpdateStatus';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { DragEvent as ReactDragEvent } from 'react';
+import { usePanel } from '../../routing/usePanel';
+import { useAbilityTab } from '../../routing/subPages';
 import { AnimatePresence, motion } from 'motion/react';
 import {
   Layout, Input, Dropdown, Tooltip, Badge, Modal, message,
@@ -115,8 +117,8 @@ export function Sidebar({
   const historyItemHeight = useIsMobileViewport() ? HISTORY_ITEM_H_MOBILE : HISTORY_ITEM_H;
   const sidebarLayoutKeys = usePageConfig<string[]>('navigation.sidebar_items', DEFAULT_SIDEBAR_ITEMS);
   const menuLayoutKeys = usePageConfig<string[]>('navigation.menu_items', DEFAULT_MENU_ITEMS);
-  const { panel } = useCatalogStore();
-  const abilityTab = useCatalogStore((s) => s.abilityTab);
+  const panel = usePanel();
+  const abilityTab = useAbilityTab();
   const setAbilityTab = useCatalogStore((s) => s.setAbilityTab);
   const notifUnreadCount = useMySpaceStore((s) => s.notifUnreadCount);
   const sidebarTasks = useAutomationChatStore((s) => s.sidebarTasks);
@@ -374,7 +376,6 @@ export function Sidebar({
 
   const openProjectPanel = (projectId: string) => {
     void useProjectStore.getState().openProject(projectId);
-    onSetPanel('project_detail');
   };
 
   const toggleProjectPinned = async (group: SidebarProjectGroup) => {

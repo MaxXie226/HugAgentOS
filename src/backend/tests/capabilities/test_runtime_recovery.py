@@ -226,8 +226,11 @@ def test_prepared_run_rejects_account_plane_and_integrity_changes(
     with pytest.raises(CapabilityError):
         runtime.prepare("run-a", "user-a", skill_ids=["example"], execution_plane="cloud")
     original.entry_file.write_text("tampered")
+    # 账号与执行面不符依旧整轮拒绝；单个组件被篡改只摘掉它自己。
     with pytest.raises(CapabilityError):
-        runtime.validate(run)
+        runtime.validate(run, only_skill="example")
+    runtime.rebuild(run)
+    assert "example" in runtime.get("run-a").unavailable
 
 
 def test_plugin_required_disabled_agent_blocks_optional_missing_skill_does_not(index_db, caps_root):
@@ -253,8 +256,6 @@ def test_plugin_required_disabled_agent_blocks_optional_missing_skill_does_not(i
 
 def test_mcp_contract_and_source_are_pinned_across_replay(durable_index, caps_root, monkeypatch):
     from core.capabilities import runtime
-    from core.capabilities.errors import IntegrityFailed
-
     monkeypatch.setattr(skills, "builtin_candidates", lambda: [])
     monkeypatch.setattr(skills, "current_account_profile", lambda: None)
     run = runtime.prepare("run-mcp", "u", skill_ids=[])
@@ -280,8 +281,10 @@ def test_mcp_contract_and_source_are_pinned_across_replay(durable_index, caps_ro
     assert restored["search"]["manifest_tools"] == [{"name": "one"}]
     assert restored["search"]["headers"] == {"Authorization": "secret-v2"}
     assert "secret" not in json.dumps(runtime.get("run-mcp").to_dict())
-    with pytest.raises(IntegrityFailed):
-        runtime.bind_mcp(run, {"search": {**v2["search"], "url": "http://different"}}, None)
+    # 端点换了就不再把它当成原来那个工具接上去：这一个连接器被摘掉，其余不受影响。
+    changed = runtime.bind_mcp(run, {"search": {**v2["search"], "url": "http://different"}}, None)
+    assert "search" not in changed
+    assert runtime.get("run-mcp").unavailable["mcp:search"] == "connector_changed"
 
 
 def test_agent_definition_is_pinned_on_replay(durable_index, caps_root, monkeypatch):
@@ -824,8 +827,6 @@ def test_mcp_public_environment_is_frozen_while_credentials_rotate(
     durable_index, caps_root, monkeypatch
 ):
     from core.capabilities import runtime
-    from core.capabilities.errors import IntegrityFailed
-
     monkeypatch.setattr(skills, "builtin_candidates", lambda: [])
     monkeypatch.setattr(skills, "current_account_profile", lambda: None)
     run = runtime.prepare("env-run", "u", skill_ids=[])
@@ -835,10 +836,12 @@ def test_mcp_public_environment_is_frozen_while_credentials_rotate(
     runtime.bind_mcp(
         run, {"local": {"command": "node", "env": {"MODE": "safe", "API_KEY": "new"}}}, None
     )
-    with pytest.raises(IntegrityFailed):
-        runtime.bind_mcp(
-            run, {"local": {"command": "node", "env": {"MODE": "other", "API_KEY": "new"}}}, None
-        )
+    # 凭据轮换不算契约变化；公共环境变量一改就算，于是这个连接器被摘掉。
+    changed = runtime.bind_mcp(
+        run, {"local": {"command": "node", "env": {"MODE": "other", "API_KEY": "new"}}}, None
+    )
+    assert "local" not in changed
+    assert runtime.get("env-run").unavailable["mcp:local"] == "connector_changed"
 
 
 @pytest.mark.parametrize("extra", ["__pycache__/evil.pyc", ".git/hooks/evil", "large.bin"])
@@ -846,9 +849,8 @@ def test_full_package_hash_never_skips_hidden_or_executable_bytes(
     index_db, caps_root, monkeypatch, extra
 ):
     from core.capabilities import store
-    from core.capabilities.paths import revision_for_hash
     from core.capabilities.errors import IntegrityFailed
-
+    from core.capabilities.paths import revision_for_hash
     st, inst = _intent(monkeypatch)
     store.write_from_files(
         "skill",
@@ -864,7 +866,6 @@ def test_full_package_hash_never_skips_hidden_or_executable_bytes(
 def test_full_package_hash_rejects_limit_instead_of_skipping(tmp_path, monkeypatch):
     from core.capabilities import archive
     from core.capabilities.errors import IntegrityFailed
-
     root = tmp_path / "package"
     root.mkdir()
     (root / "SKILL.md").write_text("v1")
@@ -1156,79 +1157,38 @@ def test_prepared_run_is_materialized_once_before_loading(durable_index, caps_ro
     assert len(builds) == 2
 
 
-def test_parallel_validation_propagates_failure_and_context(monkeypatch):
-    from contextvars import ContextVar
-    from types import SimpleNamespace
-    from core.capabilities import runtime
-    from core.capabilities.errors import IntegrityFailed
-
-    marker = ContextVar("validation_test")
-    marker.set("request-user")
-    seen = []
-    monkeypatch.setattr(runtime, "os", SimpleNamespace(name="nt"))
-
-    def check(name, binding, run, *, fresh, installed):
-        assert marker.get() == "request-user"
-        assert fresh is True
-        seen.append(name)
-        if name == "bad":
-            raise IntegrityFailed("modified content")
-
-    monkeypatch.setattr(runtime, "_validate_skill_binding", check)
-    run = SimpleNamespace(bindings={str(i): {} for i in range(8)} | {"bad": {}})
-    with pytest.raises(IntegrityFailed, match="modified content"):
-        runtime._check_skill_bindings(run, fresh=True, installed={})
-    assert set(seen) == set(run.bindings)
-
-
 @pytest.mark.parametrize("change", ["none", "bytes", "disabled", "removed"])
-def test_executor_assembly_final_gate(durable_index, caps_root, monkeypatch, change):
+def test_changed_grant_or_package_drops_only_that_skill(
+    durable_index, caps_root, monkeypatch, change
+):
+    """授权撤销或字节改动之后，这一份立刻从视图里摘掉，读取方再也拿不到它。"""
     from core.capabilities import runtime
-    from core.capabilities.errors import CapabilityError, ViewUnavailable
     from core.services.desktop_capability_protocol import skill_content_hash
 
     monkeypatch.setattr(skills, "builtin_candidates", lambda: [])
     comp = skills.publish_local_skill(
-        "assembly-test",
+        "gate-test",
         files={"SKILL.md": "initial"},
         content_hash=skill_content_hash("initial", {}),
         owner_user_id="owner",
     )
-    run = None
-    try:
-        with runtime.executor_assembly("assembly-" + change, "owner"):
-            run = runtime.prepare("assembly-" + change, "owner", skill_ids=["assembly-test"])
-            assert (run.run_id, run.scope_id) not in runtime._view_built
-            with pytest.raises(ViewUnavailable):
-                runtime.frozen_loader(run)
-            runtime.bind_mcp(run, {}, None)
-            if change == "bytes":
-                (comp.path / "SKILL.md").write_text("changed")
-            elif change == "disabled":
-                registry.set_enabled("skill:local:assembly-test", False)
-            elif change == "removed":
-                registry.mark_removed("skill:local:assembly-test")
-            finished = runtime.preflight(
-                run, catalog_skill_ids=["assembly-test"], available_models=set()
-            )
-            assert change == "none", "a changed grant or package must fail the final gate"
-            assert (run.run_id, run.scope_id) in runtime._view_built
-            assert runtime.frozen_loader(finished).get_skill_dir("assembly-test")
-    except CapabilityError:
-        assert change != "none"
-        assert (run.run_id, run.scope_id) not in runtime._view_built
-        with pytest.raises(CapabilityError):
-            runtime.frozen_loader(run)
+    run = runtime.prepare("gate-" + change, "owner", skill_ids=["gate-test"])
+    assert runtime.frozen_loader(run).get_skill_dir("gate-test")
+    runtime.bind_mcp(run, {}, None)
+    if change == "bytes":
+        (comp.path / "SKILL.md").write_text("changed")
+    elif change == "disabled":
+        registry.set_enabled("skill:local:gate-test", False)
+    elif change == "removed":
+        registry.mark_removed("skill:local:gate-test")
+    finished = runtime.preflight(run, available_models=set())
+    if change == "none":
+        assert "gate-test" not in finished.unavailable
+        assert runtime.frozen_loader(finished).get_skill_dir("gate-test")
+        return
+    assert "gate-test" in runtime.get(run.run_id, scope_id=run.scope_id).unavailable
+    assert not (run.view_dir / "gate-test").exists()
 
-
-def test_executor_assembly_cannot_prepare_another_run(durable_index, caps_root, monkeypatch):
-    from core.capabilities import runtime
-    from core.capabilities.errors import IntegrityFailed
-
-    monkeypatch.setattr(skills, "builtin_candidates", lambda: [])
-    with runtime.executor_assembly("expected", "owner"):
-        with pytest.raises(IntegrityFailed):
-            runtime.prepare("different", "owner", skill_ids=[])
 
 
 def test_identical_local_publication_does_not_invalidate_resolution(index_db, caps_root):
@@ -1249,9 +1209,9 @@ def test_identical_local_publication_does_not_invalidate_resolution(index_db, ca
     assert skills.view_generation() > before[1]
 
 
-def test_assembly_missing_view_target_is_integrity_error(durable_index, caps_root, monkeypatch):
+def test_missing_view_target_never_reaches_the_sandbox(durable_index, caps_root, monkeypatch):
+    """冻结的版本目录不见了：视图里不能留下这个名字，也不能悄悄指向别处。"""
     from core.capabilities import runtime
-    from core.capabilities.errors import IntegrityFailed
     from core.services.desktop_capability_protocol import skill_content_hash
 
     monkeypatch.setattr(skills, "builtin_candidates", lambda: [])
@@ -1259,8 +1219,8 @@ def test_assembly_missing_view_target_is_integrity_error(durable_index, caps_roo
     skills.publish_local_skill(
         "example", files={"SKILL.md": "v1"}, content_hash=skill_content_hash("v1", {})
     )
-    with runtime.executor_assembly("missing-view-target", "u", ""):
-        run = runtime.prepare("missing-view-target", "u", skill_ids=["example"])
-        monkeypatch.setattr(runtime, "_component", lambda binding: None)
-        with pytest.raises(IntegrityFailed):
-            runtime.rebuild(run)
+    run = runtime.prepare("missing-view-target", "u", skill_ids=["example"])
+    monkeypatch.setattr(runtime, "_component", lambda binding: None)
+    runtime.rebuild(run)
+    assert "example" in runtime.get("missing-view-target").unavailable
+    assert not (run.view_dir / "example").exists()

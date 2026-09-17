@@ -82,8 +82,7 @@ class RuntimeNamedSkillLoader(SkillLoaderBase):
         try:
             validate(self.capability_run, only_skill=self.runtime_name)
         except (OSError, CapabilityError):
-            if not self.capability_run.allow_unavailable:
-                raise
+            # 被撤销或改动过的单个技能只从枚举里消失，不牵连这一轮其它工具。
             return []
         try:
             entry = Path(self.directory) / "SKILL.md"
@@ -126,8 +125,6 @@ class RuntimeNamedSkillLoader(SkillLoaderBase):
             try:
                 await asyncio.to_thread(validate, self.capability_run, only_skill=self.runtime_name)
             except (CapabilityError, OSError):
-                if not self.capability_run.allow_unavailable:
-                    raise
                 return []
         physical = await self._physical_loader.list_skills()
         return [

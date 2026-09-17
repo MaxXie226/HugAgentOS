@@ -17,7 +17,7 @@ class SandboxUnavailableError(SandboxError):
     """The platform backend itself cannot run here.
 
     Raised when the host has no backend at all, or when the backend's runner
-    (``sandbox-exec``, ``bwrap``, the Windows launcher interpreter) is missing.
+    (``sandbox-exec``, ``bwrap``) is missing.
     """
 
 
@@ -25,7 +25,7 @@ class SandboxUnenforceableError(SandboxError):
     """The backend exists but cannot enforce the requested policy.
 
     Raised when a policy asks for a restriction the platform backend has no
-    mechanism for — the Windows restricted-token backend and read denials, for
+    mechanism for — the Windows low-integrity backend and read denials, for
     example. Refusing is the only correct answer: running anyway would report a
     confinement that is not there.
     """

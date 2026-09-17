@@ -827,12 +827,30 @@ impl Drop for LocalServerManager {
     }
 }
 
+/// 单个日志文件的上限；超过就滚存一代，只保留当前与上一代。
+const MAX_LOG_BYTES: u64 = 32 * 1024 * 1024;
+
 fn open_log(path: &Path) -> Result<File, String> {
+    rotate_log(path);
     OpenOptions::new()
         .create(true)
         .append(true)
         .open(path)
         .map_err(|e| format!("打开服务日志失败：{e}"))
+}
+
+/// 服务日志是追加写的，不滚存就会一直涨（实测跑几天到过数百 MB，写放大明显）。
+/// 每次启动检查一次：超限就把当前这份挪成 `.1`，覆盖掉更早那一代。
+fn rotate_log(path: &Path) {
+    let oversized = std::fs::metadata(path)
+        .map(|meta| meta.len() >= MAX_LOG_BYTES)
+        .unwrap_or(false);
+    if !oversized {
+        return;
+    }
+    let mut previous = path.as_os_str().to_os_string();
+    previous.push(".1");
+    let _ = std::fs::rename(path, PathBuf::from(previous));
 }
 
 fn backup_local_data(data_root: &Path, backups_root: &Path) -> Result<Option<PathBuf>, String> {

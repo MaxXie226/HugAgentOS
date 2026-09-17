@@ -13,6 +13,8 @@ import {
 } from '@ant-design/icons';
 import 'highlight.js/styles/github.css';
 import { t } from './i18n';
+import { usePanel, useRouteProjectId } from './routing/usePanel';
+import { panelFromPath } from './routing/navigation';
 
 /* styles loaded via styles/index.ts in main.tsx */
 import type { PanelKey, UserQuestionRequest } from './types';
@@ -107,7 +109,7 @@ export default function App() {
     toolResultPanel, setToolResultPanel,
     backendSessionIds, loadedMsgIds,
   } = useChatStore();
-  const { panel } = useCatalogStore();
+  const panel = usePanel();
   const setCatalogPanel = useCatalogStore((s) => s.setPanel);
   const setMySpaceTab = useMySpaceStore((s) => s.setTab);
   const isDesktopShell = useDeploymentModeStore((s) => s.isDesktop);
@@ -303,7 +305,8 @@ export default function App() {
   // in the project list.
   const projectList = useProjectStore((s) => s.list);
   // 订阅而不是 getState()：刷新后项目 id 由 sessionStorage 恢复，读快照会漏掉这次更新。
-  const currentProjectId = useProjectStore((s) => s.currentProjectId);
+  // 打开的是哪个项目由地址说了算，不从 store 再读一份
+  const currentProjectId = useRouteProjectId();
   const chatProjectName = chat?.projectId
     ? (chat.projectName || projectList.find((p) => p.project_id === chat.projectId)?.name || '')
     : '';
@@ -361,7 +364,7 @@ export default function App() {
   useEffect(() => {
     const handleEscape = (event: KeyboardEvent) => {
       if (event.key !== 'Escape' || event.defaultPrevented || event.isComposing) return;
-      if (useCatalogStore.getState().panel !== 'chat') return;
+      if (panelFromPath() !== 'chat') return;
       const state = useChatStore.getState();
       if (!state.sendingChatIds.has(state.currentChatId)) return;
       event.preventDefault();
@@ -724,7 +727,7 @@ export default function App() {
       message.error(t('新建本地项目失败') + '：' + (error instanceof Error ? error.message : String(error)));
     }, () => JSON.stringify([
       useChatStore.getState().currentChatId,
-      useCatalogStore.getState().panel,
+      panelFromPath(),
       useProjectStore.getState().currentProjectId,
     ]));
     const pending = sessionStorage.getItem('hugagent:pending-project-folder');
@@ -883,10 +886,7 @@ export default function App() {
               <span
                 className="jx-chatTopbarProject"
                 title={`${t('项目：')}${chatProjectName || t('项目')}`}
-                onClick={() => {
-                  useProjectStore.getState().openProject(chat.projectId!);
-                  setCatalogPanel('project_detail');
-                }}
+                onClick={() => { void useProjectStore.getState().openProject(chat.projectId!); }}
               >
                 {chatProjectName || t('项目')}
                 <span className="jx-chatTopbarProjectSep">/</span>
@@ -967,7 +967,7 @@ export default function App() {
               {panel === 'lab' && <LabPanel />}
               {panel === 'settings' && <SettingsPage />}
               {panel === 'my_space' && <MySpacePanel />}
-              {panel === 'projects' && <ProjectsPanel onOpenProject={(pid) => { useProjectStore.getState().openProject(pid); setCatalogPanel('project_detail'); }} />}
+              {panel === 'projects' && <ProjectsPanel onOpenProject={(pid) => { void useProjectStore.getState().openProject(pid); }} />}
               {panel === 'project_detail' && currentProjectId && (
                 <ProjectDetailPanel
                   projectId={currentProjectId}

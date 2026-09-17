@@ -316,21 +316,14 @@ def register_write(
                 ),
             )
 
-        # ── Reverse sync: myspace paths auto-persist; other paths follow register_as_artifact ──
+        # ── Artifact registration for non-myspace paths ──────────────────
+        # A write under /myspace needs nothing here: the file has landed in the user's
+        # own directory, and core.myspace.watcher registers it from the filesystem
+        # event — the same way it registers everything else written there, tool or not.
         artifact_ref: Optional[dict] = None
         from core.artifacts.local_project import is_project_file_path
-        if is_persistent and user_id:
-            # Folder-aware reverse sync: create the UserFolder chain per
-            # /myspace/<folder>/<filename> and set user_folder_id, so the "My Space"
-            # directory structure flows back faithfully.
-            artifact_ref = _ms.sync_upsert(
-                user_id=user_id,
-                chat_id=chat_id,
-                logical_path=file_path,
-                content=new_bytes,
-                scope=scope,
-            )
-        elif register_as_artifact and user_id and (
+        needs_registration = bool(register_as_artifact and user_id and not is_persistent)
+        if needs_registration and (
             is_project_file_path(file_path, scope) or is_project_file_path(physical, scope)
         ):
             from core.artifacts.local_project import reference_project_file
@@ -343,7 +336,7 @@ def register_write(
             except (HTTPException, OSError, ValueError) as exc:
                 return resp_json({"error": str(getattr(exc, "detail", exc)), "file_path": file_path,
                                   "note": "文件已写入，但未交付。请将最终文件保存在当前项目内后再 pin。"})
-        elif register_as_artifact and user_id:
+        elif needs_registration:
             artifact_ref = upsert_myspace_artifact(
                 user_id=user_id,
                 chat_id=chat_id,
@@ -381,7 +374,7 @@ def register_write(
     Write.__doc__ = (
         "创建文件或全量覆盖已存在文件。\n\n"
         "写 ``/myspace/<文件夹>/<文件名>`` 时目录层级会映射到我的空间目录树"
-        "（缺失文件夹自动建），写入立即同步、同名文件保持同一 file_id。\n\n"
+        "（缺失文件夹自动建），同名文件保持同一 file_id。\n\n"
         "**前置**：覆盖现存文件前必须先 ``Read`` 完整读过（不传 offset/limit），否则被拒；"
         "小修改优先用 ``Edit``（只发 diff，比全量重写省 token）。\n\n"
         "Args:\n"

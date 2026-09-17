@@ -58,7 +58,7 @@
         "http://localhost:3000/api/v1/desktop/latest.json"
       ],
       "windows": {
-        "installMode": "quiet"
+        "installMode": "passive"
       }
     }
   }

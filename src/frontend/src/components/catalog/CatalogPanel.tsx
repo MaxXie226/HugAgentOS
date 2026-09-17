@@ -14,6 +14,7 @@ import { parseSeparators } from '../../utils/separators';
 import { useChunkChildrenExpander } from '../../hooks/useChunkChildrenExpander';
 import { usePanelHeader } from '../../hooks/usePageConfig';
 import { useCatalogStore, useEditionStore, useKbStore } from '../../stores';
+import { useKbTab } from '../../routing/subPages';
 import { KBChunkImages, WikiPanel } from '../kb';
 import IndexModePicker from '../kb/IndexModePicker';
 import { t } from '../../i18n';
@@ -241,8 +242,9 @@ export function CatalogPanel({ embedded = false }: CatalogPanelProps = {}) {
     manageQuery, setManageQuery,
     selectedId, setSelectedId,
     fetchCatalog, toggleItem,
-    kbTab: activeTab, setKbTab: setActiveTab,
+    setKbTab: setActiveTab,
   } = useCatalogStore();
+  const activeTab = useKbTab();
 
   // There are two kinds of create-knowledge-base permission: private (self only) / public (visible to everyone by default, can be further restricted by authorization).
   const canCreatePrivateKb = useAuthStore((s) => s.authUser?.can_create_private_kb === true);

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """一次性对账：把沙箱镜像目录与「我的空间」拉回一致。
 
-背景见 ``core/llm/tools/myspace_mirror.py``。修复上线后每次 bash、每次打开「我的空间」
-都会实时对账，本脚本负责清掉修复之前积压的两类历史欠账：
+背景见 ``core/myspace/mirror.py``。日常登记由 ``core/myspace/watcher.py`` 按文件事件
+完成，本脚本是人工兜底，用来处理它按设计不碰的那类欠账：
 
 - **该显示没显示**：沙箱写在 ``/myspace`` 下的文件没有 artifact 记录，用户在界面上看不见，
   新会话却每次都挂得到 → 登记进「我的空间」；
@@ -10,7 +10,7 @@
   整个文件夹被删、里面的文件又从没登记过的那批算「残留」，**默认只统计不删** ——
   它们在对象存储里没有副本，删了找不回来，要清得显式加 ``--prune-stale``。
 
-改动了用户已有文件的那一类不在这里处理 —— 那要过写入确认门，交给 bash 工具在对话里问。
+改动了用户已有文件的那一类不在这里处理 —— 那要过写入确认门，由监听器在对话里问。
 
 用法（在 backend 容器里跑）：
 
@@ -58,7 +58,7 @@ def main() -> int:
     if not users:
         ap.error("至少要给 --user <uid> 或 --all")
 
-    from core.llm.tools import myspace_mirror as mm
+    from core.myspace import mirror as mm
 
     for uid in users:
         changes = mm.collect_mirror_changes(user_id=uid)
@@ -78,7 +78,12 @@ def main() -> int:
         # 先清残留（正向），再登记新文件：顺序反了会把刚清掉的又登记回去
         mm.reset_pull_cursor(uid)
         pull = mm.pull_myspace_updates(user_id=uid)
-        refs = mm.register_new_files(user_id=uid)
+        fresh = mm.collect_mirror_changes(user_id=uid)
+        refs = [
+            ref
+            for entry in fresh.new
+            if (ref := mm.register_entry(user_id=uid, entry=entry))
+        ]
         pruned = (
             mm.prune_stale(user_id=uid, entries=changes.stale) if args.prune_stale else 0
         )

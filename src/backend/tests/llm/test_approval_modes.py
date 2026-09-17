@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+from pathlib import Path
+
 import json
 from unittest.mock import AsyncMock, patch
 
@@ -143,30 +146,49 @@ async def test_trusted_unattended_runs_ignore_the_chat_preset():
     ("mode", "asks"),
     [(APPROVAL_ASK, True), (APPROVAL_AUTO, False), (APPROVAL_FULL, False)],
 )
-async def test_bash_myspace_writeback_follows_the_preset(mode, asks):
-    """bash 把沙盒改动回写「我的空间」也要认这一档。
+async def test_myspace_writeback_follows_the_preset(mode, asks, monkeypatch):
+    """沙盒改写「我的空间」里已有文件时的确认也要认这一档。
 
-    这条确认是工具自己发起的、不经过 ToolPermissionMiddleware 的判定，历史上
-    一律弹框——用户明明选了「完全放开」，跑个 bash 照样被逐个文件拦下来。
+    这条确认不经过 ToolPermissionMiddleware 的判定，历史上一律弹框——用户明明选了
+    「完全放开」，跑个 bash 照样被逐个文件拦下来。发起方现在是文件系统登记器，它跑在
+    自己的任务里读不到 ContextVar，所以按用户设置里的档位判。
     """
-    from core.llm.tool_permissions import CURRENT_APPROVAL_MODE
-    from core.llm.tools._common import myspace_write_guard
+    from core.myspace import mirror, watcher
 
-    token = CURRENT_APPROVAL_MODE.set(mode)
-    try:
-        with patch(
-            "core.llm.tools._myspace_confirm.gate", new=AsyncMock(return_value=None)
-        ) as gate:
-            await myspace_write_guard(
-                chat_id="chat-1",
-                op=OP_WRITE,
-                logical_path="/myspace/报告.xlsx",
-                is_myspace=True,
-                interactive=True,
-                summary="bash 修改了 /myspace/报告.xlsx，同步回我的空间",
-            )
-    finally:
-        CURRENT_APPROVAL_MODE.reset(token)
+    monkeypatch.setattr(
+        "core.llm.tool_permissions.resolve_approval_mode",
+        lambda explicit, *, user_id: mode,
+    )
+    monkeypatch.setattr(watcher, "_HANDOFF_GRACE_S", 0)
+
+    async def _claim(user_id, rel, stamp):
+        return True
+
+    monkeypatch.setattr(watcher, "_claim", _claim)
+    monkeypatch.setattr(watcher, "_confirm_chat", lambda uid: "chat-1")
+    monkeypatch.setattr(
+        watcher,
+        "_stat_all",
+        lambda uid, rels: {
+            rel: mirror.MirrorEntry(rel=rel, path=Path("/tmp") / rel, size=1, mtime=1.0)
+            for rel in rels
+        },
+    )
+    monkeypatch.setattr(
+        mirror,
+        "classify_claimed",
+        lambda *, user_id, entries: {rel: mirror.VERDICT_MODIFIED for rel in entries},
+    )
+    monkeypatch.setattr(
+        mirror, "register_entry", lambda *, user_id, entry: {"file_id": "f1"}
+    )
+
+    reg = watcher.MySpaceRegistry()
+    reg._budget = watcher._Budget(watcher._INFLIGHT_BUDGET_BYTES)
+    with patch(
+        "core.llm.tools._myspace_confirm.gate", new=AsyncMock(return_value=None)
+    ) as gate:
+        await reg._process("u1", ["报告.xlsx"])
     assert gate.await_count == (1 if asks else 0)
 
 

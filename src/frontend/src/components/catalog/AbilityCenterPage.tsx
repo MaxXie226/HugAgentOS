@@ -1,12 +1,12 @@
 import { DesktopAvailableCapabilities } from '../desktop/DesktopAvailableCapabilities';
 import { useDeploymentModeStore } from '../../stores/deploymentModeStore';
-import { useEffect, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { useDesktopCapabilityStore } from '../../stores/desktopCapabilityStore';
 import type { DeviceCapabilityKind } from '../../api';
-import { useCatalogStore } from '../../stores';
 import type { AbilityTabKey } from '../../types';
 import { AgentPanel } from '../agent/AgentPanel';
 import { ABILITY_TABS } from './abilityTabs';
+import { useAbilityTab } from '../../routing/subPages';
 import { SkillsPage } from './SkillsPage';
 import { McpPage } from './McpPage';
 import { PluginsPage } from './PluginsPage';
@@ -31,8 +31,11 @@ const PANES: Record<AbilityTabKey, () => ReactNode> = {
  * 挂载后不再卸载，切回来仍保留滚动位置与列表状态。
  */
 export function AbilityCenterPage() {
-  const abilityTab = useCatalogStore((s) => s.abilityTab);
-  const visited = useCatalogStore((s) => s.visitedAbilityTabs);
+  const abilityTab = useAbilityTab();
+  // 四个 pane 首次访问才挂载（各自会拉一份列表），挂载后常驻——这是本页的懒加载状态，
+  // 不是「当前在哪个类别」的副本。
+  const [visited, setVisited] = useState<Set<AbilityTabKey>>(() => new Set([abilityTab]));
+  if (!visited.has(abilityTab)) setVisited(new Set(visited).add(abilityTab));
   const partial = useDeploymentModeStore((s) => s.partialCapabilities);
   const dual = useDeploymentModeStore((s) => s.provisionMode === 'dual');
   const load = useDesktopCapabilityStore((s) => s.load);
@@ -61,7 +64,7 @@ export function AbilityCenterPage() {
             className={`jx-abilityCenterPane${abilityTab === key ? ' active' : ''}`}
             aria-hidden={abilityTab !== key}
           >
-            {visited.includes(key) ? PANES[key]() : null}
+            {visited.has(key) ? PANES[key]() : null}
           </div>
         ))}
       </div>

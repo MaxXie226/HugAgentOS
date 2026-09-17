@@ -35,6 +35,7 @@ from typing import Optional
 
 import httpx
 from core.auth.backend import UserContext, get_current_user
+from core.infra.logging import quiet_access_log
 from core.infra.responses import success_response
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -797,6 +798,7 @@ async def cloud_bridge_status(_user: UserContext = Depends(get_current_user)):
 
 
 @router.get("/cloud-bridge/readiness", summary="桌面壳首次能力同步进度")
+@quiet_access_log
 async def cloud_bridge_readiness(_: None = Depends(_require_desktop_shell_control)):
     from core.services.desktop_cloud_bridge import initial_sync_status
 

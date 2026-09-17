@@ -72,49 +72,6 @@ def resolve_sandbox_session(
     return sandbox_session_id or chat_id
 
 
-async def myspace_write_guard(
-    *,
-    chat_id: Optional[str],
-    op: str,
-    logical_path: str,
-    is_myspace: bool,
-    interactive: bool,
-    summary: str,
-) -> Optional[ToolResponse]:
-    """§13 gate (Claude Code shape): an unconfirmed /myspace write **suspends the
-    current tool coroutine** to wait for the user's out-of-band decision; approve
-    → return None to let it through (the caller performs the write once in place),
-    reject/timeout/non-interactive → return an intercepting ToolResponse (the
-    caller returns it directly).
-
-    NOTE: this function ``await``s — the caller must ``await myspace_write_guard(...)``.
-    While suspended it only pauses the agent task, it does not block the event
-    loop / SSE (see the _myspace_confirm header note).
-    """
-    # Non-/myspace writes (temporary sandbox artifacts etc.) are not gated — this
-    # is an admission decision unique to the myspace flow, kept here in the caller
-    # layer so the generic gate() stays kind-agnostic.
-    if not is_myspace:
-        return None
-    from core.llm.tool_permissions import preset_answers_confirmation
-
-    # 权限档同样管这条路：bash 把沙盒改动回写「我的空间」是工具自己发起的确认，
-    # 不经过 ToolPermissionMiddleware 的判定，得在这里问一次同一个档位，
-    # 否则用户选了「完全放开」照样被逐个文件拦下来。
-    if preset_answers_confirmation(op=op):
-        return None
-    from core.llm.tools import _myspace_confirm as _mc
-
-    blk = await _mc.gate(
-        chat_id=chat_id,
-        op=op,
-        logical_path=logical_path,
-        interactive=interactive,
-        summary=summary,
-    )
-    return resp_json(blk) if blk is not None else None
-
-
 def myspace_mutation_refusal(
     scope: Any,
     logical_path: str,
@@ -393,13 +350,15 @@ def pin_artifact_to_workspace(ref: dict[str, Any]) -> bool:
     """Pin an artifact ref into the per-run workspace state.
 
     The frontend's "attachment card" rendering is gated by ``workspace_files``
-    (see MessageBubble.renderArtifactCards). Without an explicit pin, an
-    in-place Edit or Write produces no visible card in the current turn —
-    the file_id is the same as before, ``workspaceFiles`` is empty for this
-    turn, and the user has no visual confirmation of the change.
+    (see MessageBubble.renderArtifactCards). Without a pin, an in-place Edit or
+    Write produces no visible card in the current turn — the file_id is the same
+    as before, ``workspaceFiles`` is empty for this turn, and the user has no
+    visual confirmation of the change. Pinning right after the write closes that
+    gap without waiting for the model to call ``pin_to_workspace`` itself.
 
-    Auto-pinning every successful myspace upsert solves the UX gap: a fresh
-    card always appears in the same turn as the Edit/Write.
+    **只在写文件的那一轮的异步上下文里挂得上**：ContextVar 那份状态就是"当前这一轮"，
+    卡片因此一定落在真正写了文件的会话里。不属于任何一轮的调用方（文件系统登记器）拿不到
+    这个确定性，也就不该挂卡片 —— 它按用户找会话的那条老路，把别的会话写的文件挂了进来。
     """
     file_id = ref.get("file_id") if isinstance(ref, dict) else None
     if not file_id:

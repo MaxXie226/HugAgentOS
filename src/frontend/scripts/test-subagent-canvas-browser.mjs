@@ -46,7 +46,8 @@ function Fixture() {
 <ToolCallRow tool={{ id: 'connector', name: 'search_web', inputText: '{', status: 'running' }} isStreaming />
 </div></section>{open && <div className="jx-canvasPanelSlot jx-rightSidebarSlot"><SubagentSidebarPanel /></div>}</main></>;
 }
-createRoot(document.getElementById('root')).render(<Fixture />);
+import { MemoryRouter } from 'react-router';
+createRoot(document.getElementById('root')).render(<MemoryRouter initialEntries={['/ability-center']}><Fixture /></MemoryRouter>);
 `, resolveDir: process.cwd(), loader: 'tsx' }, outfile: resolve(output, 'fixture.js'), external: ['/loader.gif', '/loader-done.png'], bundle: true, format: 'esm', jsx: 'automatic', define: { 'import.meta.env': '{}' }, loader: { '.woff': 'dataurl', '.woff2': 'dataurl', '.ttf': 'dataurl' } });
 const browser = await chromium.launch({ headless: true });
 try {

@@ -25,7 +25,7 @@ from core.chat.context import (
 from core.db.engine import SessionLocal, get_db
 from core.db.models import MessageFeedback
 from core.infra.exceptions import ResourceNotFoundError, ServiceUnavailableError
-from core.infra.logging import get_logger
+from core.infra.logging import get_logger, quiet_access_log
 from core.infra.responses import (
     created_response,
     paginated_response,
@@ -424,6 +424,7 @@ def list_pending_confirms(
 
 
 @router.get("/pending-user-questions", summary="批量查询本人会话的待回答问题")
+@quiet_access_log
 def list_pending_user_questions(
     user: UserContext = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -836,7 +837,7 @@ def _resolve_explicit_capability_invocation(
             try:
                 cloud_plugin = (
                     cloud_plugin_selection(
-                        request.plugin_id, user_id=user_id, allow_unavailable=True
+                        request.plugin_id, user_id=user_id
                     )
                     if capabilities_enabled()
                     else None

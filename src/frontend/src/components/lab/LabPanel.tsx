@@ -1,5 +1,7 @@
-import { useState } from 'react';
+import { useCallback } from 'react';
 import { useAuthStore } from '../../stores';
+import { navigateTo, pathForPanel } from '../../routing/navigation';
+import { useRouteSubs } from '../../routing/usePanel';
 import { staggerStyle } from '../../utils/motionTokens';
 import { usePanelHeader } from '../../hooks/usePageConfig';
 import { EDITION_LAB_ITEMS, SkillDistillPanel } from '../../labEdition';
@@ -26,7 +28,14 @@ const LAB_ITEMS = [
 ];
 
 export default function LabPanel() {
-  const [subPanel, setSubPanel] = useState<'skill_distill' | 'autonomous_loop' | null>(null);
+  // 两个子应用各占一段地址：/lab/skill-distill、/lab/autonomous-loop
+  const subs = useRouteSubs();
+  const subPanel = subs[0] === 'skill-distill' ? 'skill_distill'
+    : subs[0] === 'autonomous-loop' ? 'autonomous_loop' : null;
+  const setSubPanel = useCallback((next: 'skill_distill' | 'autonomous_loop' | null) => {
+    navigateTo(pathForPanel('lab', next === 'skill_distill' ? 'skill-distill'
+      : next === 'autonomous_loop' ? 'autonomous-loop' : null));
+  }, []);
   const labEnabled = useAuthStore((s) => s.authUser?.lab_enabled);
   const { title: labTitle, subtitle: labSubtitle } = usePanelHeader('lab', {
     title: '实验室',
