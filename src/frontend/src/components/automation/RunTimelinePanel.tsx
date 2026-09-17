@@ -9,7 +9,7 @@ import {
   LoadingOutlined,
   RightOutlined,
 } from '@ant-design/icons';
-import { useAutomationChatStore, useAutomationStore, useCatalogStore } from '../../stores';
+import { useAutomationChatStore, useCatalogStore } from '../../stores';
 import type { AutomationChatGroup, AutomationRun, AutomationRunStatus } from '../../types';
 import { DUR, EASE, staggerStyle } from '../../utils/motionTokens';
 import { useStatusFlash } from '../../hooks/useFlash';
@@ -48,7 +48,6 @@ function summarizeRun(run: AutomationRun): string {
 
 export function RunTimelinePanel() {
   const { activeGroup, selectedRunId, selectRun, exitAutomationChat } = useAutomationChatStore();
-  const { setSelectedTaskId } = useAutomationStore();
   const { setPanel } = useCatalogStore();
 
   // Exit snapshot: when App.tsx's AnimatePresence plays the exit animation, store.activeGroup is already null,
@@ -136,9 +135,8 @@ export function RunTimelinePanel() {
   const latestRun = numberedRuns[0];
 
   const navigateBackToDetail = () => {
-    setSelectedTaskId(group.taskId);
-    // 定时任务已从应用中心拆成一级面板，回详情直接落到 'automation'
-    setPanel('automation');
+    // 定时任务已从应用中心拆成一级面板；任务 id 要随这一次跳转一起给出，否则会被冲回任务列表
+    setPanel('automation', group.taskId);
     exitAutomationChat();
   };
 

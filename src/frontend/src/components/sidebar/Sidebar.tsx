@@ -3,7 +3,7 @@ import { useDesktopUpdateStatus } from '../../desktop/useDesktopUpdateStatus';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { DragEvent as ReactDragEvent } from 'react';
 import { usePanel } from '../../routing/usePanel';
-import { useAbilityTab } from '../../routing/subPages';
+import { abilitySlug, useAbilityTab } from '../../routing/subPages';
 import { AnimatePresence, motion } from 'motion/react';
 import {
   Layout, Input, Dropdown, Tooltip, Badge, Modal, message,
@@ -19,7 +19,6 @@ import {
   MessageOutlined, SortAscendingOutlined,
 } from '@ant-design/icons';
 import { useUIStore, useChatStore, useAuthStore, useMySpaceStore, useAutomationChatStore, useAutomationStore, useSidebarOrderStore } from '../../stores';
-import { useCatalogStore } from '../../stores/catalogStore';
 import { useProjectStore } from '../../stores/projectStore';
 import { useDeploymentModeStore } from '../../stores/deploymentModeStore';
 import { usePageConfig, usePageConfigAll } from '../../hooks/usePageConfig';
@@ -81,7 +80,8 @@ interface SidebarProps {
   onCommitRename: (id: string) => void;
   onExportChat: (id: string) => void;
   onSelectChat: (id: string) => void;
-  onSetPanel: (p: PanelKey) => void;
+  /** `sub` 是面板内的二级页（能力中心的类别），必须随这一次进入一起给出。 */
+  onSetPanel: (p: PanelKey, sub?: string) => void;
 }
 
 
@@ -119,7 +119,6 @@ export function Sidebar({
   const menuLayoutKeys = usePageConfig<string[]>('navigation.menu_items', DEFAULT_MENU_ITEMS);
   const panel = usePanel();
   const abilityTab = useAbilityTab();
-  const setAbilityTab = useCatalogStore((s) => s.setAbilityTab);
   const notifUnreadCount = useMySpaceStore((s) => s.notifUnreadCount);
   const sidebarTasks = useAutomationChatStore((s) => s.sidebarTasks);
   const sidebarPrefs = useAutomationChatStore((s) => s.sidebarPrefs);
@@ -638,10 +637,7 @@ export function Sidebar({
             children: meta.children.map((child) => ({
               key: `${key}-${child.key}`,
               label: abilityTabLabel(child.key, child.label),
-              onClick: () => {
-                setAbilityTab(child.key);
-                onSetPanel(meta.targetPanel);
-              },
+              onClick: () => onSetPanel(meta.targetPanel, abilitySlug(child.key)),
             })),
           }
           : {
@@ -901,10 +897,7 @@ export function Sidebar({
                           className={`jx-navSubItem${
                             panel === meta.targetPanel && abilityTab === child.key ? ' active' : ''
                           }`}
-                          onClick={() => {
-                            setAbilityTab(child.key);
-                            onSetPanel(meta.targetPanel);
-                          }}>
+                          onClick={() => onSetPanel(meta.targetPanel, abilitySlug(child.key))}>
                           <span>{abilityTabLabel(child.key, child.label)}</span>
                         </button>
                       ))}

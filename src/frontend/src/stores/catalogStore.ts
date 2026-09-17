@@ -1,9 +1,9 @@
 import { create } from 'zustand';
-import type { AbilityTabKey, Catalog, KbTabKey, PanelKey } from '../types';
+import type { Catalog, KbTabKey, PanelKey } from '../types';
 import { getCatalog, updateCatalogItem } from '../api';
 import { loadCatalog, saveCatalog } from '../storage';
 import { navigateTo, pathForPanel } from '../routing/navigation';
-import { abilitySlug, pathForKbTab } from '../routing/subPages';
+import { pathForKbTab } from '../routing/subPages';
 
 /**
  * 「当前停在哪个面板 / 哪个二级页」一律由地址栏决定（`/my-space/kb/public`、
@@ -24,11 +24,11 @@ interface CatalogState {
 
   setCatalog: (catalog: Catalog) => void;
   setCatalogLoading: (v: boolean) => void;
-  /** 切换面板 = 跳到该面板的地址。 */
-  setPanel: (panel: PanelKey) => void;
+  /** 切换面板 = 跳到该面板的地址；`sub` 是要直接落到的二级页（如能力中心的类别）。
+   *  二级页必须随这一次跳转一起给出——先跳类别再跳面板会把类别冲掉。 */
+  setPanel: (panel: PanelKey, sub?: string) => void;
   setManageQuery: (query: string) => void;
   setSelectedId: (id: string | null) => void;
-  setAbilityTab: (tab: AbilityTabKey) => void;
   setKbTab: (tab: KbTabKey) => void;
 
   /** Fetch catalog from backend, merge with localStorage enabled state */
@@ -49,21 +49,16 @@ export const useCatalogStore = create<CatalogState>((set, get) => ({
     saveCatalog(catalog);
   },
   setCatalogLoading: (v) => set({ catalogLoading: v }),
-  setPanel: (panel) => {
+  setPanel: (panel, sub) => {
     set((state) => ({
       panelEntryNonce: state.panelEntryNonce + 1,
       selectedId: null,
       manageQuery: '',
     }));
-    navigateTo(pathForPanel(panel));
+    navigateTo(pathForPanel(panel, sub));
   },
   setManageQuery: (query) => set({ manageQuery: query }),
   setSelectedId: (id) => set({ selectedId: id }),
-  setAbilityTab: (tab) => {
-    set({ manageQuery: '' });
-    navigateTo(pathForPanel('ability_center', abilitySlug(tab)));
-  },
-
   setKbTab: (tab) => {
     set({ manageQuery: '' });
     navigateTo(pathForKbTab(tab));

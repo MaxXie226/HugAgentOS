@@ -111,7 +111,6 @@ export default function App() {
   } = useChatStore();
   const panel = usePanel();
   const setCatalogPanel = useCatalogStore((s) => s.setPanel);
-  const setMySpaceTab = useMySpaceStore((s) => s.setTab);
   const isDesktopShell = useDeploymentModeStore((s) => s.isDesktop);
   const desktopProvisionMode = useDeploymentModeStore((s) => s.provisionMode);
   const capabilityGateOpen = useDeploymentModeStore((s) => s.capabilityGateOpen);
@@ -163,11 +162,10 @@ export default function App() {
   };
 
   useEffect(() => {
-    if (panel === 'share_records') {
-      setMySpaceTab('shares');
-      setCatalogPanel('my_space');
-    }
-  }, [panel, setCatalogPanel, setMySpaceTab]);
+    // 旧的 /share-records 地址并进「我的空间 → 分享记录」：模块要随这一次跳转一起给出，
+    // 分两次跳会被后一次冲回模块首页。
+    if (panel === 'share_records') setCatalogPanel('my_space', 'shares');
+  }, [panel, setCatalogPanel]);
 
   // Dynamically apply page title + favicon from config
   useEffect(() => {
@@ -698,8 +696,8 @@ export default function App() {
     closeMobileSidebar();
   };
 
-  const handleSetPanel = (p: PanelKey) => {
-    setPanelSafe(p);
+  const handleSetPanel = (p: PanelKey, sub?: string) => {
+    setPanelSafe(p, sub);
     closeMobileSidebar();
   };
 
@@ -740,10 +738,7 @@ export default function App() {
 
   const handleCapabilityClick = (capabilityId: string) => {
     // 知识库已并入「我的空间」的 Tab，首页快捷入口直接落到那个 Tab
-    if (capabilityId === 'knowledge') {
-      setMySpaceTab('kb');
-      setPanelSafe('my_space');
-    }
+    if (capabilityId === 'knowledge') setPanelSafe('my_space', 'kb');
   };
 
   // ── Derived header text (for non-chat panels) ──

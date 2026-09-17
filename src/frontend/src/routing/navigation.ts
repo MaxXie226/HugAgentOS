@@ -111,8 +111,17 @@ export function subsFromPath(pathname: string = currentPath()): string[] {
   return parts.slice(1).map(decodeURIComponent);
 }
 
+/** 同一轮里跳向两个不同地址时，后一次会把前一次整个盖掉（`/ability-center/skills` 被
+ *  `/ability-center` 冲回）。面板与它的下级页必须并进一次跳转，这里把误用喊出来。 */
+let sameTickPath: string | null = null;
+
 export function navigateTo(to: string, opts?: { replace?: boolean }) {
   if (!router || (requestedPath ?? currentPath()) === to) return;
+  if (sameTickPath && sameTickPath !== to) {
+    console.warn(`[navigation] 同一轮跳了两次：${sameTickPath} 被 ${to} 盖掉，请把下级页并进一次跳转`);
+  }
+  sameTickPath = to;
+  queueMicrotask(() => { sameTickPath = null; });
   requestedPath = to;
   void router.navigate(to, opts);
 }

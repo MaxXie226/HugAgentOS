@@ -48,7 +48,14 @@ def store(monkeypatch):
         return snapshot
 
     def _save(chat_id, snapshot):
+        # First writer wins, mirroring the locked read-modify-write in the real store.
+        stored = saved.get(chat_id)
+        if stored is not None and stored.matches(
+            scope_user_id=snapshot.scope_user_id, workspace_id=snapshot.workspace_id
+        ):
+            return stored
         saved[chat_id] = snapshot
+        return snapshot
 
     monkeypatch.setattr(M, "load_session_memory_snapshot", _load)
     monkeypatch.setattr(M, "save_session_memory_snapshot", _save)
@@ -219,3 +226,16 @@ async def test_memory_off_neither_retrieves_nor_stores(store, retrievals):
     assert handle.retrieval_task is None
     assert retrievals == []
     assert store == {}
+
+
+@pytest.mark.asyncio
+async def test_concurrent_first_turns_converge_on_one_snapshot(store, retrievals):
+    """Two runs opening the same chat at once must not disagree about what it froze."""
+    a, b = await asyncio.gather(_turn("chat-1", "并发A"), _turn("chat-1", "并发B"))
+
+    assert a == b, "并发的两轮必须注入同一份快照"
+    assert store["chat-1"].text == a
+    # A third turn replays the same snapshot and issues no further search.
+    before = len(retrievals)
+    assert await _turn("chat-1", "之后") == a
+    assert len(retrievals) == before

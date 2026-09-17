@@ -101,29 +101,44 @@ def load_session_memory_snapshot(
 def save_session_memory_snapshot(
     chat_id: Optional[str],
     snapshot: SessionMemorySnapshot,
-) -> None:
-    """Record the frozen block for this chat so later turns replay it."""
+) -> SessionMemorySnapshot:
+    """Record the frozen block for this chat, returning whatever the chat ends up frozen on.
+
+    First writer wins. Two runs opening the same chat at the same moment both find no
+    snapshot and both retrieve; without this the second would overwrite the first and the
+    session would disagree with itself about what it froze. The row is locked for the
+    read-modify-write so the two cannot interleave, and a caller that loses the race gets
+    the stored snapshot back and injects that instead of its own.
+    """
     if not chat_id:
-        return
+        return snapshot
     try:
         from core.db.engine import SessionLocal
         from core.db.models import ChatSession
         from sqlalchemy.orm.attributes import flag_modified
 
         with SessionLocal() as db:
-            row = db.query(ChatSession).filter(ChatSession.chat_id == chat_id).first()
+            row = (
+                db.query(ChatSession)
+                .filter(ChatSession.chat_id == chat_id)
+                .with_for_update()
+                .first()
+            )
             if row is None:
-                return
+                return snapshot
             data = dict(row.extra_data or {})
-            payload = snapshot.to_payload()
-            if data.get(_SNAPSHOT_KEY) == payload:
-                return
-            data[_SNAPSHOT_KEY] = payload
+            stored = SessionMemorySnapshot.from_payload(data.get(_SNAPSHOT_KEY))
+            if stored is not None and stored.matches(
+                scope_user_id=snapshot.scope_user_id, workspace_id=snapshot.workspace_id
+            ):
+                return stored
+            data[_SNAPSHOT_KEY] = snapshot.to_payload()
             row.extra_data = data
             flag_modified(row, "extra_data")
             db.commit()
     except Exception as exc:  # noqa: BLE001
         logger.warning("[memory] frozen snapshot persist failed chat=%s: %s", chat_id, exc)
+    return snapshot
 
 
 __all__ = [

@@ -410,6 +410,9 @@ async def resolve_session_memory(handle: SessionMemory) -> str:
     The assembled block is stored only once the memory read actually landed. A
     timed-out or degraded first turn leaves no snapshot, so the next turn tries
     once more rather than freezing an accidental blank for the whole chat.
+
+    The store is first-writer-wins, and we inject what it hands back: if another run
+    froze this chat while we were retrieving, we use its snapshot, not ours.
     """
     if not handle.memory_enabled:
         return ""
@@ -422,22 +425,23 @@ async def resolve_session_memory(handle: SessionMemory) -> str:
         handle.retrieval_task,
         memory_enabled=handle.memory_enabled,
     )
-    if built.settled:
-        await asyncio.to_thread(
-            save_session_memory_snapshot,
-            handle.chat_id,
-            SessionMemorySnapshot(
-                text=built.text,
-                scope_user_id=handle.scope_user_id,
-                workspace_id=handle.workspace_id,
-            ),
-        )
-    else:
+    if not built.settled:
         logger.info(
             "[memory] frozen snapshot not stored chat=%s: memory read did not settle",
             handle.chat_id,
         )
-    return built.text
+        return built.text
+
+    effective = await asyncio.to_thread(
+        save_session_memory_snapshot,
+        handle.chat_id,
+        SessionMemorySnapshot(
+            text=built.text,
+            scope_user_id=handle.scope_user_id,
+            workspace_id=handle.workspace_id,
+        ),
+    )
+    return effective.text
 
 
 def _session_message(text: str, **item_kwargs: Any) -> Dict[str, Any]:

@@ -7,6 +7,7 @@ import {
 } from '@ant-design/icons';
 import { useAutomationStore } from '../../stores/automationStore';
 import { useCatalogStore } from '../../stores/catalogStore';
+import { abilitySlug } from '../../routing/subPages';
 import { useRouteSubs } from '../../routing/usePanel';
 import { useChatStore } from '../../stores/chatStore';
 import { useProjectStore } from '../../stores/projectStore';
@@ -45,8 +46,7 @@ async function startAutomationCreationInChat() {
 
   if (!plugin) {
     message.info(t('首次通过对话创建定时任务需要安装插件，请先在能力中心 → 插件里安装后再创建'));
-    useCatalogStore.getState().setAbilityTab('plugins');
-    useCatalogStore.getState().setPanel('ability_center');
+    useCatalogStore.getState().setPanel('ability_center', abilitySlug('plugins'));
     return;
   }
 
