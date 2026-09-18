@@ -40,15 +40,18 @@ _workspace_var: ContextVar[Optional[_WorkspaceState]] = ContextVar(
 )
 
 
+def _new_state() -> _WorkspaceState:
+    return {"pinned": [], "seen": set(), "active": False}
+
+
 def init_state() -> _WorkspaceState:
     """Initialize a fresh workspace state in the current async context.
 
     Call once at the entry of each chat run (chat_stream, chat_run_executor,
     automation_scheduler) so subsequent pin_to_workspace calls land in this
-    state. Returns the state dict so callers can read it later if they
-    prefer to skip get_state().
+    state.
     """
-    state: _WorkspaceState = {"pinned": [], "seen": set(), "active": False}
+    state = _new_state()
     _workspace_var.set(state)
     return state
 
@@ -83,7 +86,7 @@ def scope() -> Iterator[_WorkspaceState]:
     (``chat_stream``, ``chat_run_executor``, ``automation_scheduler``)
     can use ``init_state()`` directly since they own the outermost scope.
     """
-    state: _WorkspaceState = {"pinned": [], "seen": set(), "active": False}
+    state = _new_state()
     token = _workspace_var.set(state)
     try:
         yield state

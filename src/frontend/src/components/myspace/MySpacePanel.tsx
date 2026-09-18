@@ -28,6 +28,7 @@ import {
   useCatalogStore,
   useChatStore,
 } from '../../stores';
+import { useMySpaceTab } from '../../routing/subPages';
 import { useMySpaceStore } from '../../stores/mySpaceStore';
 import type { KBItem, MySpaceTab, ResourceItem } from '../../types';
 import { buildFileUrl } from '../../utils/constants';
@@ -120,6 +121,11 @@ export function MySpacePanel() {
     uploadPersonalFile,
   } = useMySpaceStore();
   const { catalog, setPanel } = useCatalogStore();
+  // 模块由地址决定：直接打开 /my-space/<模块> 或按前进后退时把数据切过去
+  const routeTab = useMySpaceTab();
+  useEffect(() => {
+    if (useMySpaceStore.getState().tab !== routeTab) useMySpaceStore.getState().syncTab(routeTab);
+  }, [routeTab]);
   const setCurrentChatId = useChatStore((state) => state.setCurrentChatId);
   const openCanvas = useCanvasStore((state) => state.openCanvas);
   const searchTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);

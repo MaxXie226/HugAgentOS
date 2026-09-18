@@ -1,138 +1,96 @@
-//! 顶部原生菜单栏（文件 / 编辑 / 视图 / 帮助），对标 Codex 等桌面客户端。
+//! 顶部菜单：macOS 用系统菜单栏（`build`），Windows/Linux 用 `proxy.rs` 注入的窗口内
+//! 标题栏菜单。两边的动作最终都汇到本文件的 `dispatch_for_window`，动作 id 只有一套。
 //!
-//! 菜单是原生控件、由 Rust 侧 `on_menu_event` 处理，**不经 WebView**——因此不受「远程源
-//! 下 Tauri IPC 不可靠」影响，是驱动壳层能力（新建对话 / 设置服务器 / 检查更新）的可靠入口。
-//! 编辑、全屏等用系统预定义项（`PredefinedMenuItem`），撤销/复制/粘贴等由系统直接作用于
+//! 菜单动作由 Rust 侧处理、**不经 WebView IPC**——反代这种远程源下自定义命令会被
+//! Tauri 的 ACL 拒绝，所以壳层能力（新建对话 / 设置服务器 / 检查更新）都不依赖 IPC。
+//! 编辑、全屏等用系统预定义项（`PredefinedMenuItem`），撤销/复制/粘贴由系统直接作用于
 //! 焦点输入框，无需自己接线。
 
-use tauri::menu::{AboutMetadataBuilder, Menu, MenuEvent, MenuItem, SubmenuBuilder};
-use tauri::{AppHandle, Manager, Runtime};
+// 菜单构建相关的类型只有 macOS 的 `build` 用得到；其它平台只走下面的动作分发。
+#[cfg(target_os = "macos")]
+use tauri::menu::{AboutMetadataBuilder, Menu, MenuItem, SubmenuBuilder};
+#[cfg(target_os = "macos")]
+use tauri::Runtime;
+use tauri::menu::MenuEvent;
+use tauri::{AppHandle, Manager};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 
 use crate::brand;
 use crate::Shared;
 
-/// macOS 使用系统应用菜单；Windows/Linux 主窗口使用与标题同一行的 WebView 菜单。
-#[allow(dead_code)]
+/// macOS 专用的系统应用菜单。Windows/Linux 不挂原生菜单——那两个平台显示的是
+/// `proxy.rs` 注入的窗口内标题栏菜单（`TB_MENU`），菜单项只在那边定义一份。
+#[cfg(target_os = "macos")]
 pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     let config = crate::config::load(&app.state::<Shared>().config_dir);
     let hybrid =
         brand::HYBRID_ONLY || config.provision_mode() == crate::config::ProvisionMode::Dual;
     let local_capable = config.provision_mode() != crate::config::ProvisionMode::CloudOnly;
-    #[cfg(target_os = "macos")]
-    {
-        let about = AboutMetadataBuilder::new()
-            .name(Some(brand::NAME.to_string()))
-            .version(Some(app.package_info().version.to_string()))
-            .build();
-        let application = SubmenuBuilder::new(app, brand::NAME)
-            .about(Some(about))
-            .separator()
-            .text("server_config", "设置…")
-            .text("check_update", "检查更新…")
-            .separator()
-            .services()
-            .separator()
-            .hide()
-            .hide_others()
-            .show_all()
-            .separator()
-            .quit()
-            .build()?;
+    let about = AboutMetadataBuilder::new()
+        .name(Some(brand::NAME.to_string()))
+        .version(Some(app.package_info().version.to_string()))
+        .build();
+    let application = SubmenuBuilder::new(app, brand::NAME)
+        .about(Some(about))
+        .separator()
+        .text("server_config", "设置…")
+        .text("check_update", "检查更新…")
+        .separator()
+        .services()
+        .separator()
+        .hide()
+        .hide_others()
+        .show_all()
+        .separator()
+        .quit()
+        .build()?;
 
-        let mut file = SubmenuBuilder::new(app, "文件")
-            .item(&MenuItem::with_id(app, "new_window", "新建窗口", true, Some("CmdOrCtrl+Shift+N"))?)
-            .text("new_chat", "新建对话");
-        // 仅交付混合模式的包没有别的形态可切，不摆一个点了也没意义的入口。
-        if !hybrid {
-            file = file.text("run_mode", "运行模式…");
-        }
-        if local_capable {
-            file = file.text("open_folder", "打开文件夹…");
-        }
-        if !hybrid {
-            file = file.text("local_server", "本机服务…");
-        }
-        let file = file.separator().quit().build()?;
-
-        let edit = SubmenuBuilder::new(app, "编辑")
-            .undo()
-            .redo()
-            .separator()
-            .cut()
-            .copy()
-            .paste()
-            .select_all()
-            .build()?;
-
-        let view = SubmenuBuilder::new(app, "显示")
-            .text("reload", "重新加载")
-            .separator()
-            .fullscreen()
-            .build()?;
-
-        let window = SubmenuBuilder::new(app, "窗口")
-            .minimize()
-            .maximize()
-            .build()?;
-
-        let help = SubmenuBuilder::new(app, "帮助")
-            .text("website", "访问官网")
-            .build()?;
-
-        return Menu::with_items(app, &[&application, &file, &edit, &view, &window, &help]);
+    let mut file = SubmenuBuilder::new(app, "文件")
+        .item(&MenuItem::with_id(app, "new_window", "新建窗口", true, Some("CmdOrCtrl+Shift+N"))?)
+        .text("new_chat", "新建对话");
+    // 仅交付混合模式的包没有别的形态可切，不摆一个点了也没意义的入口。
+    if !hybrid {
+        file = file.text("run_mode", "运行模式…");
     }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        let mut file = SubmenuBuilder::new(app, "文件")
-            .item(&MenuItem::with_id(app, "new_window", "新建窗口", true, Some("CmdOrCtrl+Shift+N"))?)
-            .text("new_chat", "新建对话");
-        // 仅交付混合模式的包没有别的形态可切，不摆一个点了也没意义的入口。
-        if !hybrid {
-            file = file.text("run_mode", "运行模式…");
-        }
-        if local_capable {
-            file = file.text("open_folder", "打开文件夹…");
-        }
-        if !hybrid {
-            file = file
-                .text("server_config", "设置服务器地址…")
-                .text("local_server", "本机服务…");
-        }
-        let file = file.separator().quit().build()?;
-
-        // 编辑：交给系统预定义项，直接作用于焦点输入框。
-        let edit = SubmenuBuilder::new(app, "编辑")
-            .undo()
-            .redo()
-            .separator()
-            .cut()
-            .copy()
-            .paste()
-            .select_all()
-            .build()?;
-
-        let view = SubmenuBuilder::new(app, "视图")
-            .text("reload", "重新加载")
-            .separator()
-            .fullscreen()
-            .build()?;
-
-        let about = AboutMetadataBuilder::new()
-            .name(Some(brand::NAME.to_string()))
-            .version(Some(app.package_info().version.to_string()))
-            .build();
-        let help = SubmenuBuilder::new(app, "帮助")
-            .text("check_update", "检查更新…")
-            .text("website", "访问官网")
-            .separator()
-            .about(Some(about))
-            .build()?;
-
-        Menu::with_items(app, &[&file, &edit, &view, &help])
+    if local_capable {
+        file = file.text("open_folder", "打开文件夹…");
     }
+    if !hybrid {
+        file = file.text("local_server", "本机服务…");
+    }
+    let file = file.separator().quit().build()?;
+
+    let edit = SubmenuBuilder::new(app, "编辑")
+        .undo()
+        .redo()
+        .separator()
+        .cut()
+        .copy()
+        .paste()
+        .select_all()
+        .build()?;
+
+    let view = SubmenuBuilder::new(app, "显示")
+        .text("reload", "重新加载")
+        .separator()
+        .item(&MenuItem::with_id(app, "zoom_in", "放大", true, Some("CmdOrCtrl+Plus"))?)
+        .item(&MenuItem::with_id(app, "zoom_out", "缩小", true, Some("CmdOrCtrl+-"))?)
+        .item(&MenuItem::with_id(app, "zoom_reset", "实际大小", true, Some("CmdOrCtrl+0"))?)
+        .separator()
+        .fullscreen()
+        .build()?;
+
+    let window = SubmenuBuilder::new(app, "窗口")
+        .minimize()
+        .maximize()
+        .build()?;
+
+    let help = SubmenuBuilder::new(app, "帮助")
+        .text("website", "访问官网")
+        .build()?;
+
+    Menu::with_items(app, &[&application, &file, &edit, &view, &window, &help])
 }
 
 /// 菜单事件分发。托盘的同名动作也复用这里（见 `build_tray`）。
@@ -210,6 +168,10 @@ pub fn dispatch_for_window(app: &AppHandle, id: &str, label: &str) {
                 let _ = w.eval("window.location.reload()");
             }
         }
+        // 页面缩放：只改用户自己的档位，系统 DPI 仍由 WebView 原生处理。
+        "zoom_in" => crate::adjust_user_zoom(app, 1),
+        "zoom_out" => crate::adjust_user_zoom(app, -1),
+        "zoom_reset" => crate::adjust_user_zoom(app, 0),
         "check_update" => {
             let update_base = app.state::<Shared>().update_base.clone();
             crate::update::check_and_install(app.clone(), update_base, false);

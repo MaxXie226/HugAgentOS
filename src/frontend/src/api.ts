@@ -179,6 +179,28 @@ export function isLocalChat(chatId?: string | null): boolean {
 function localHeader(): Record<string, string> {
   return { [LOCAL_TARGET_HEADER]: 'local' };
 }
+
+/** 四类能力（智能体 / 技能 / 连接器 / 插件）的写入接口。 */
+const CAPABILITY_WRITE_PATH = /^\/v1\/(catalog|plugins|marketplace|agent-marketplace|mcp-market|agents)(\/|$)/;
+/** 知识库挂在 catalog 下，但它不是能力项，仍然归云端。 */
+const KB_PATH = /^\/v1\/catalog\/kb(\/|$)/;
+
+/** 混合模式下四类能力的写入一律落本机：本机自成一套能力体系，启停与增删就地
+ *  生效，不经云端往返——云端只在登录和能力增删时下发清单，不认启停变更。
+ *  纯本机模式的壳本来就把所有请求指向本机后端，不必额外打头。 */
+function capabilityWriteHeaders(url: string, method?: string): Record<string, string> {
+  if (!_hybridDual) return {};
+  const verb = (method || 'GET').toUpperCase();
+  if (verb === 'GET' || verb === 'HEAD' || verb === 'OPTIONS') return {};
+  // 调用方给的可能是裸路径，也可能是带 /api 前缀的整地址，一律从 /v1/ 起算。
+  const pathname = new URL(url, 'http://request.invalid').pathname;
+  const start = pathname.indexOf('/v1/');
+  if (start < 0) return {};
+  const path = pathname.slice(start);
+  if (KB_PATH.test(path) || !CAPABILITY_WRITE_PATH.test(path)) return {};
+  return localHeader();
+}
+
 /** 项目作用域请求的路由头：本地项目 → 本机；否则空对象（云端默认）。 */
 export function projectTargetHeaders(projectId?: string | null): Record<string, string> {
   return _hybridDual && isLocalProject(projectId) ? localHeader() : {};
@@ -372,6 +394,7 @@ export async function apiRequest<T>(
     'Content-Type': 'application/json',
     // 混合路由：显式声明本地目标时打头（web / 非双模式下反代忽略该头）。
     ...(target === 'local' ? localHeader() : {}),
+    ...capabilityWriteHeaders(path, options?.method),
     // 兜底：与 authFetch 同源推断——路径含本地项目/本地会话 id 时自动打头，
     // 否则 file-confirm / pending-confirm 等会话作用域请求会被误发云端，
     // 云端无此会话而报「会话不存在或无权访问」。
@@ -2581,6 +2604,11 @@ export function authFetch(input: RequestInfo | URL, init?: RequestInit): Promise
   const url = request?.url ?? String(input);
   const headers = new Headers(inferTargetHeadersFromUrl(url));
   new Headers(init?.headers ?? request?.headers).forEach((value, key) => headers.set(key, value));
+  for (const [key, value] of Object.entries(
+    capabilityWriteHeaders(url, init?.method ?? request?.method),
+  )) {
+    headers.set(key, value);
+  }
   const localTarget = headers.get(LOCAL_TARGET_HEADER) === 'local'
     || new URL(url, 'http://request.invalid').searchParams.get('hg_target') === 'local';
   return fetch(input, {

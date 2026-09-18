@@ -66,14 +66,13 @@ class _Toolkit:
         self.fn = fn
 
 
-def _bash(*, interactive: bool):
+def _bash():
     toolkit = _Toolkit()
     register_bash(
         toolkit,
         loader=None,
         loaded_skill_ids=set(),
         chat_id="chat-1",
-        interactive=interactive,
     )
     assert toolkit.fn is not None
     return toolkit.fn
@@ -115,7 +114,7 @@ async def _run_authorized(command: str, *, interactive: bool, approval_mode: str
     assert outcome.ticket is not None
     token = CURRENT_PERMISSION_TICKET.set(outcome.ticket)
     try:
-        return await _bash(interactive=interactive)(command)
+        return await _bash()(command)
     finally:
         CURRENT_PERMISSION_TICKET.reset(token)
 
@@ -140,7 +139,7 @@ async def test_local_bash_execution_boundary_rejects_missing_ticket():
         patch.dict("os.environ", {"SANDBOX_TOOLS_ENABLED": "true"}),
         patch("core.config.local_mode.local_mode_enabled", return_value=True),
     ):
-        response = await _bash(interactive=True)("ls")
+        response = await _bash()("ls")
     payload = _payload(response)
     assert payload["blocked"] is True
     assert "授权票据" in payload["error"]
@@ -338,7 +337,7 @@ async def test_an_unattended_run_is_confined_like_an_interactive_one():
         assert outcome.ticket.local_command.confined is True
         token = CURRENT_PERMISSION_TICKET.set(outcome.ticket)
         try:
-            response = await _bash(interactive=False)("ls -la")
+            response = await _bash()("ls -la")
         finally:
             CURRENT_PERMISSION_TICKET.reset(token)
 

@@ -38,13 +38,30 @@ export function purgeLegacyUnscopedKeys() {
   if (typeof window === 'undefined') return;
   const legacyKeys = [
     STORAGE_KEY,
-    'hugagent_current_chat_id',
     'hugagent_pending_scroll_message_ts',
     'hugagent_share_records_cache',
     'hugagent_automation_sidebar_prefs_v1',
+    // 账号级配置改由数据库供给，浏览器里不再留副本
+    'hugagent_memory_enabled',
+    'hugagent_memory_write_enabled',
+    'hugagent_ontology_enabled',
   ];
   for (const k of legacyKeys) {
     try { window.localStorage.removeItem(k); } catch { /* ignore */ }
+  }
+  // 「当前开着哪段会话 / 停在哪个面板」已经交给地址栏，这两个按用户分键的指针作废。
+  purgeByPrefix(['hugagent_current_chat_id', 'hugagent_active_panel']);
+}
+
+/** 按前缀清理。这两个键是按用户分开存的（`<key>:<userId>`），同一浏览器上登录过的
+ *  每个账号都留了一份，所以只能扫而不能按固定键删。 */
+function purgeByPrefix(prefixes: string[]) {
+  for (const store of [window.localStorage, window.sessionStorage]) {
+    try {
+      for (const key of Object.keys(store)) {
+        if (prefixes.some((p) => key === p || key.startsWith(`${p}:`))) store.removeItem(key);
+      }
+    } catch { /* storage 不可用 */ }
   }
 }
 

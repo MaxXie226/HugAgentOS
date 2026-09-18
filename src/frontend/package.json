@@ -45,7 +45,8 @@
     "test:html-preview-browser": "node scripts/test-html-preview-browser.mjs",
     "test:desktop-menu-update": "esbuild scripts/test-desktop-update.tsx scripts/test-desktop-folder.ts --bundle --platform=node --format=esm --jsx=automatic --packages=external --define:import.meta.env={} --outdir=node_modules/.tmp/desktop-menu-update --out-extension:.js=.mjs && node node_modules/.tmp/desktop-menu-update/test-desktop-update.mjs && node node_modules/.tmp/desktop-menu-update/test-desktop-folder.mjs",
     "test:attachment-routing": "esbuild scripts/test-attachment-routing.ts --bundle --platform=node --format=esm --define:import.meta.env={} --outfile=node_modules/.tmp/test-attachment-routing.mjs && node node_modules/.tmp/test-attachment-routing.mjs",
-    "test:attachment-send": "esbuild scripts/test-attachment-send.tsx --bundle --platform=node --format=esm --jsx=automatic --packages=external --loader:.css=empty --define:import.meta.env={} --outfile=node_modules/.tmp/test-attachment-send.mjs && node node_modules/.tmp/test-attachment-send.mjs"
+    "test:attachment-send": "esbuild scripts/test-attachment-send.tsx --bundle --platform=node --format=esm --jsx=automatic --packages=external --loader:.css=empty --define:import.meta.env={} --outfile=node_modules/.tmp/test-attachment-send.mjs && node node_modules/.tmp/test-attachment-send.mjs",
+    "test:chat-routing": "node scripts/test-chat-routing.mjs"
   },
   "dependencies": {
     "@ant-design/icons": "^6.1.0",
@@ -72,6 +73,7 @@
     "opentype.js": "1.3.4",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
+    "react-router": "^7.18.4",
     "xlsx": "^0.18.5",
     "zustand": "^5.0.11"
   },

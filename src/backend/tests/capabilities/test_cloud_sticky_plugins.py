@@ -50,10 +50,8 @@ def test_real_persisted_selection_restores_cloud_plugin_and_full_preflight(selec
     )
     run = runtime.preflight(
         run,
-        skill_ids=restored.skill_ids,
         plugin_ids=restored.install_ids,
-        available_mcp=restored.mcp_ids,
-    )
+        available_mcp=restored.mcp_ids)
     assert any(node["install_id"] == plugin.install_id for node in run.dependency_report["nodes"])
 
 
@@ -81,15 +79,11 @@ def test_sticky_complete_plugin_declarations_block_missing_required_component(
         skill_ids=restored.skill_ids,
         plugin_ids=restored.install_ids,
     )
-    with pytest.raises(dependency.DependencyMissing):
-        runtime.preflight(
-            run,
-            skill_ids=restored.skill_ids,
-            plugin_ids=restored.install_ids,
-            available_mcp=restored.mcp_ids,
-        )
-    report = runtime.get(run.run_id).dependency_report
-    assert any("missing-reviewer" in str(error["dependency_chain"]) for error in report["errors"])
+    # 插件声明了一个必需但不存在的组件：这个插件被摘掉，整轮不受牵连。
+    dropped = runtime.preflight(
+        run, plugin_ids=restored.install_ids, available_mcp=restored.mcp_ids
+    )
+    assert dropped.unavailable["plugin:" + plugin.install_id] == "dependency_missing"
 
 
 @pytest.mark.parametrize("change", ["user", "account", "disable"])
@@ -107,6 +101,15 @@ def test_persisted_cloud_selection_rejects_identity_change_or_revocation(
         monkeypatch.setattr(bridge, "get_state", lambda: state("other-cloud-owner"))
     else:
         registry.set_enabled(plugin.install_id, False)
+    if change == "disable":
+        # 自己账号下被停用的粘滞插件：这一轮不恢复它，如实记成不可用，对话照常。
+        sticky = plugin_loader.resolve_sticky_plugin_capabilities(
+            user_id=user, chat_id="sticky-cloud"
+        )
+        assert sticky.install_ids == []
+        assert sticky.unavailable_ids == [plugin.install_id]
+        return
+    # 身份变了就是另一个人的东西，必须整体拒绝。
     with pytest.raises(PermissionDenied):
         plugin_loader.resolve_sticky_plugin_capabilities(user_id=user, chat_id="sticky-cloud")
 
@@ -121,7 +124,7 @@ def test_raw_explicit_cloud_id_is_saved_with_its_account_scope(selected):
 
 def test_soft_run_connector_honors_parent_plugin_disable(selected, monkeypatch):
     from dataclasses import replace
-    from core.capabilities.availability import save
+    from core.capabilities.runtime import save
     from core.llm.capability_tools import connector_available
     from core.services import desktop_cloud_bridge as bridge
 
@@ -131,7 +134,6 @@ def test_soft_run_connector_honors_parent_plugin_disable(selected, monkeypatch):
         "local-owner",
         skill_ids=[skill.key],
         plugin_ids=[plugin.install_id],
-        allow_unavailable=True,
     )
     run = runtime.preflight(run, plugin_ids=[plugin.install_id], available_mcp=["pack-search"])
     assert plugin.install_id in run.dependency_report["connector_parents"]["pack-search"]
@@ -245,7 +247,9 @@ def test_saved_plugin_replay_uses_frozen_definition_after_manifest_update(select
     restored = activate(plugin)
     kwargs = dict(skill_ids=restored.skill_ids, plugin_ids=restored.install_ids)
     run = runtime.prepare("sticky-replay", "local-owner", **kwargs)
-    first = runtime.preflight(run, available_mcp=restored.mcp_ids, **kwargs)
+    first = runtime.preflight(
+        run, available_mcp=restored.mcp_ids, plugin_ids=restored.install_ids
+    )
     definition = json.loads(comp.entry_file.read_text())
     definition["components"]["agents"] = [{"id": "new-unavailable-agent", "required": True}]
     files = plugins.plugin_manifest_files(definition)
@@ -267,15 +271,16 @@ def test_saved_plugin_replay_uses_frozen_definition_after_manifest_update(select
     replay = runtime.preflight(
         replay,
         available_mcp=restored.mcp_ids,
-        skill_ids=restored.skill_ids,
-        plugin_ids=restored.install_ids,
-    )
+        plugin_ids=restored.install_ids)
     assert replay.dependency_report == first.dependency_report
     assert any(
         node["revision"] == comp.revision
         for node in replay.dependency_report["nodes"]
         if node["install_id"] == plugin.install_id
     )
+    # 新的一轮按当前定义走：它要求一个不存在的智能体，所以这个插件被摘掉。
     fresh = runtime.prepare("sticky-next-turn", "local-owner", **kwargs)
-    with pytest.raises(dependency.DependencyMissing):
-        runtime.preflight(fresh, available_mcp=restored.mcp_ids, **kwargs)
+    dropped = runtime.preflight(
+        fresh, available_mcp=restored.mcp_ids, plugin_ids=restored.install_ids
+    )
+    assert dropped.unavailable["plugin:" + plugin.install_id] == "dependency_missing"

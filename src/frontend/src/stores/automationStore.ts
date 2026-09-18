@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { navigateTo, pathForPanel } from '../routing/navigation';
 import type { AutomationTask } from '../types';
 import {
   listAutomations,
@@ -16,7 +17,6 @@ interface AutomationState {
   loading: boolean;
   availabilityWarning: string;
   createModalOpen: boolean;
-  selectedTaskId: string | null;
 
   setTasks: (tasks: AutomationTask[]) => void;
   setLoading: (v: boolean) => void;
@@ -36,12 +36,12 @@ export const useAutomationStore = create<AutomationState>((set, get) => ({
   loading: false,
   availabilityWarning: '',
   createModalOpen: false,
-  selectedTaskId: null,
 
   setTasks: (tasks) => set({ tasks }),
   setLoading: (loading) => set({ loading }),
   setCreateModalOpen: (v) => set({ createModalOpen: v }),
-  setSelectedTaskId: (id) => set({ selectedTaskId: id }),
+  // 打开 / 关闭任务详情 = 换地址（/automation/<任务id>），不在 store 里另存一份位置
+  setSelectedTaskId: (id) => navigateTo(pathForPanel('automation', id)),
 
   fetchTasks: async () => {
     set({ loading: true });
@@ -95,5 +95,5 @@ export const useAutomationStore = create<AutomationState>((set, get) => ({
     return updated;
   },
 
-  reset: () => set({ tasks: [], availabilityWarning: '', loading: false, createModalOpen: false, selectedTaskId: null }),
+  reset: () => set({ tasks: [], availabilityWarning: '', loading: false, createModalOpen: false }),
 }));

@@ -27,8 +27,8 @@ export function useChatActions(effectiveApiUrl: string) {
   const { setPanel } = useCatalogStore();
   const { setEditingChatId, setEditingTitle, editingTitle } = useUIStore();
 
-  function setPanelSafe(p: import('../types').PanelKey) {
-    setPanel(p);
+  function setPanelSafe(p: import('../types').PanelKey, sub?: string) {
+    setPanel(p, sub);
   }
 
   function newChat(inputRef: React.RefObject<HTMLTextAreaElement | null>) {

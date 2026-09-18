@@ -28,7 +28,7 @@ async def test_timed_out_retrieval_keeps_running_and_becomes_observable(monkeypa
     task = asyncio.create_task(slow_retrieval())
     M.track_memory_retrieval(task)
 
-    block = await M.build_frozen_memory_block("u1", "default", task)
+    block = (await M.build_frozen_memory_block("u1", "default", task)).text
 
     assert block == ""
     assert task.done() is False
@@ -60,7 +60,7 @@ async def test_launch_path_leaves_internal_timeout_unowned_and_continues(monkeyp
     monkeypatch.setattr(M.profile, "get", empty_profile)
     task = await M.launch_memory_retrieval("u1", "hello", True, budget_ms=1)
 
-    assert await M.build_frozen_memory_block("u1", "default", task) == ""
+    assert (await M.build_frozen_memory_block("u1", "default", task)).text == ""
     assert observed_timeouts == [None]
     assert task.done() is False
     assert M.get_retrieval_state(task) == "timed_out_running"

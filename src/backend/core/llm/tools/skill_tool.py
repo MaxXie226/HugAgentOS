@@ -156,19 +156,11 @@ def register_sandboxed_view_text_file(
                         ),
                         None,
                     )
-                if requested_name is None and prepared.allow_unavailable:
-                    return ToolResponse(
-                        content=[
-                            TextBlock(
-                                type="text",
-                                text="该技能暂不可用，请继续说明情况或使用其他可用能力。",
-                            )
-                        ]
-                    )
-                await asyncio.to_thread(validate, prepared, only_skill=requested_name)
+                # 路径落不到任何一个已授权技能上：交给下面的目录白名单判定，
+                # 由它给出明确的拒绝，而不是含糊地说「技能暂不可用」。
+                if requested_name is not None:
+                    await asyncio.to_thread(validate, prepared, only_skill=requested_name)
             except (CapabilityError, OSError):
-                if not prepared.allow_unavailable:
-                    raise
                 return ToolResponse(
                     content=[
                         TextBlock(

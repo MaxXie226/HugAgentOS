@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useCatalogStore } from '../../stores';
+import { useAbilityTab } from '../../routing/subPages';
 import { useDeploymentModeStore } from '../../stores/deploymentModeStore';
 import { desktopCapabilityRequest } from './capabilitySyncApi';
 import './capabilitySync.css';
@@ -9,7 +9,7 @@ const kinds: Record<string, string> = { agents: 'agent', skills: 'skill', mcp: '
 const titles: Record<string, string> = { agents: '智能体', skills: '技能', mcp: '连接器', plugins: '插件' };
 
 export function DesktopAvailableCapabilities() {
-  const tab = useCatalogStore((s) => s.abilityTab);
+  const tab = useAbilityTab();
   const [items, setItems] = useState<Item[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);

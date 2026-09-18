@@ -171,8 +171,9 @@ class PolicyContext:
     not from this layer.
 
     ``state_dir`` is where a backend may keep per-host state it must remember
-    between runs. Only the Windows backend needs it today, for the capability
-    SIDs whose grants are written onto the authorized folders themselves.
+    between runs. Only the Windows backend needs it today, to remember which
+    folders currently carry its integrity label and to house the private
+    scratch directory.
     """
 
     cwd: str

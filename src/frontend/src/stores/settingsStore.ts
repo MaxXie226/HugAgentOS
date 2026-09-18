@@ -15,7 +15,6 @@ import {
 } from '../api';
 import { message } from 'antd';
 import { t } from '../i18n';
-import { writeLocal } from '../storage';
 
 
 async function _safeLoad<T>(
@@ -81,10 +80,13 @@ interface SettingsState {
   clearMemories: () => Promise<void>;
 }
 
+// 记忆 / 本体这些开关是账号级配置，真源在数据库（users_shadow.metadata），进页面由
+// loadMemorySettings / loadOntologySettings 从接口取。这里的初值只是接口回来之前的占位，
+// 不做浏览器端缓存——换台机器、换个浏览器读到的值必须一致。
 export const useSettingsStore = create<SettingsState>((set, get) => ({
   settingsOpen: false,
-  memoryEnabled: localStorage.getItem('hugagent_memory_enabled') === 'true',
-  memoryWriteEnabled: localStorage.getItem('hugagent_memory_write_enabled') === 'true',
+  memoryEnabled: false,
+  memoryWriteEnabled: false,
   memoryServiceAvailable: false,
   embeddingAvailable: false,
   memoryItems: [],
@@ -92,7 +94,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   memoryLoading: false,
   rerankerEnabled: false,
   rerankerAvailable: false,
-  ontologyEnabled: localStorage.getItem('hugagent_ontology_enabled') === 'true',
+  ontologyEnabled: false,
   ontologyAvailable: false,
   ontologyImportValidationForced: false,
   ontologyActivePacks: [],
@@ -103,23 +105,14 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   memoryGraphEnabled: false,
 
   setSettingsOpen: (v) => set({ settingsOpen: v }),
-  setMemoryEnabled: (v) => {
-    writeLocal('hugagent_memory_enabled', String(v));
-    set({ memoryEnabled: v });
-  },
-  setMemoryWriteEnabled: (v) => {
-    writeLocal('hugagent_memory_write_enabled', String(v));
-    set({ memoryWriteEnabled: v });
-  },
+  setMemoryEnabled: (v) => set({ memoryEnabled: v }),
+  setMemoryWriteEnabled: (v) => set({ memoryWriteEnabled: v }),
   setMemoryItems: (items) => set({ memoryItems: items }),
   setMemoryPanelOpen: (v) => set({ memoryPanelOpen: v }),
   setMemoryLoading: (v) => set({ memoryLoading: v }),
   setRerankerEnabled: (v) => set({ rerankerEnabled: v }),
   setRerankerAvailable: (v) => set({ rerankerAvailable: v }),
-  setOntologyEnabled: (v) => {
-    writeLocal('hugagent_ontology_enabled', String(v));
-    set({ ontologyEnabled: v });
-  },
+  setOntologyEnabled: (v) => set({ ontologyEnabled: v }),
 
   loadMemorySettings: async () => {
     try {
@@ -132,8 +125,6 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         rerankerEnabled: settings.reranker_enabled,
         rerankerAvailable: settings.reranker_available,
       });
-      writeLocal('hugagent_memory_enabled', String(settings.memory_enabled));
-      writeLocal('hugagent_memory_write_enabled', String(settings.memory_write_enabled));
     } catch (e) {
       console.error('Failed to load memory settings:', e);
     }
@@ -148,7 +139,6 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         ontologyImportValidationForced: settings.plugin_import_build_validation_forced ?? false,
         ontologyActivePacks: settings.active_packs || [],
       });
-      writeLocal('hugagent_ontology_enabled', String(settings.ontology_enabled));
     } catch (e) {
       console.error('Failed to load ontology settings:', e);
     }
@@ -157,24 +147,20 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   toggleMemory: async (enabled) => {
     if (enabled && !get().memoryServiceAvailable) {
       set({ memoryEnabled: false, lastToggleError: { key: 'memory', ts: Date.now() } });
-      writeLocal('hugagent_memory_enabled', 'false');
       message.error(t('当前实例未配置记忆服务'));
       return;
     }
     if (enabled && !get().embeddingAvailable) {
       set({ memoryEnabled: false, lastToggleError: { key: 'memory', ts: Date.now() } });
-      writeLocal('hugagent_memory_enabled', 'false');
       message.warning(t('开启记忆前请先配置并分配 embedding 模型'));
       return;
     }
     const prev = get().memoryEnabled;
     set({ memoryEnabled: enabled });
-    writeLocal('hugagent_memory_enabled', String(enabled));
     try {
       await updateMemorySettings(enabled);
     } catch (error) {
       set({ memoryEnabled: prev, lastToggleError: { key: 'memory', ts: Date.now() } });
-      writeLocal('hugagent_memory_enabled', String(prev));
       message.error((error as Error).message || t('记忆设置更新失败'));
     }
   },
@@ -182,24 +168,20 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   toggleMemoryWrite: async (enabled) => {
     if (enabled && !get().memoryServiceAvailable) {
       set({ memoryWriteEnabled: false, lastToggleError: { key: 'memoryWrite', ts: Date.now() } });
-      writeLocal('hugagent_memory_write_enabled', 'false');
       message.error(t('当前实例未配置记忆服务'));
       return;
     }
     if (enabled && !get().embeddingAvailable) {
       set({ memoryWriteEnabled: false, lastToggleError: { key: 'memoryWrite', ts: Date.now() } });
-      writeLocal('hugagent_memory_write_enabled', 'false');
       message.warning(t('开启记忆前请先配置并分配 embedding 模型'));
       return;
     }
     const prev = get().memoryWriteEnabled;
     set({ memoryWriteEnabled: enabled });
-    writeLocal('hugagent_memory_write_enabled', String(enabled));
     try {
       await updateMemoryWriteSettings(enabled);
     } catch (error) {
       set({ memoryWriteEnabled: prev, lastToggleError: { key: 'memoryWrite', ts: Date.now() } });
-      writeLocal('hugagent_memory_write_enabled', String(prev));
       message.error((error as Error).message || t('写入记忆设置更新失败'));
     }
   },
@@ -218,12 +200,10 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   toggleOntology: async (enabled) => {
     const prev = get().ontologyEnabled;
     set({ ontologyEnabled: enabled });
-    writeLocal('hugagent_ontology_enabled', String(enabled));
     try {
       await updateOntologySettings(enabled);
     } catch {
       set({ ontologyEnabled: prev, lastToggleError: { key: 'ontology', ts: Date.now() } });
-      writeLocal('hugagent_ontology_enabled', String(prev));
       message.error(t('本体校验设置更新失败'));
     }
   },

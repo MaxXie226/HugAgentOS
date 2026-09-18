@@ -257,10 +257,10 @@ async def test_real_scoped_snapshots_reach_runner_and_audit_without_root_drift(
 
     publish("root revision")
     root = runtime.prepare("same-run", "user-1", skill_ids=["scope-marker"])
-    root = runtime.preflight(root, skill_ids=["scope-marker"], available_models=set())
+    root = runtime.preflight(root, available_models=set())
     publish("child revision")
     child = runtime.prepare("same-run", "user-1", skill_ids=["scope-marker"], scope_id="child:one")
-    child = runtime.preflight(child, skill_ids=["scope-marker"], available_models=set())
+    child = runtime.preflight(child, available_models=set())
     assert root.view_dir != child.view_dir
     assert root.bindings != child.bindings
     sessions = []

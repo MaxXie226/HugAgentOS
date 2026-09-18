@@ -113,12 +113,12 @@ POST /v1/file/upload                      GET /files/{file_id}
 - 缓存目录：`{STORAGE_PATH}/myspace_cache/{user_id}/...`（`core/sandbox/_common.py::myspace_cache_dir`），团队文件另有 `team_cache_dir(team_id)` 共享缓存；
 - **seed**：持久沙箱首次创建会话时，把缓存目录文件灌入沙箱 `/workspace/myspace/{user_id}/`，后续按 mtime 增量同步；
 - **懒加载**：沙箱内 Read/Glob/Grep 命中缺失文件时，按路径解析 artifact，从对象存储按需下载并物化进沙箱（`core/llm/tools/myspace_vfs.py::materialize_into_sandbox`）;
-- **反向同步**：Write/Edit/Delete/Move 等工具把沙箱侧改动写回——同时更新 `artifacts` 表（对象存储）与 myspace_cache 镜像，保证下次 seed 一致；
-- **实时对账**：`bash` 直接写出的文件不经过上面那些工具，由 `core/llm/tools/myspace_mirror.py` 在每次命令前后、以及打开「我的空间」列表时对账（新文件登记展示、改动已有文件过确认门、界面上删掉的同步清出镜像），详见 [沙箱模块](./sandbox.md)。
+- **删除 / 移动 / 建文件夹**：这三个是对我的空间下的指令（与界面上的按钮同类），由工具直接更新 `artifacts` 表与 myspace_cache 镜像；
+- **实时登记**：镜像目录里发生的任何写入或删除，都由 `core/myspace/watcher.py` 登记回 `artifacts` 账本——**不区分是谁写的**（工具、`bash`、后台进程、子智能体、技能 CLI 一视同仁）。新文件直接登记展示，改动或删除用户已有文件过确认门（否决则从对象存储还原），用户已删的残留绝不复活。详见 [沙箱模块](./sandbox.md)。
 
 这意味着对象存储是**唯一真源**，myspace_cache 只是加速镜像，可随时清空重建。
 
-> ⚠️ 开启 `OPENSANDBOX_MYSPACE_BIND_MOUNT_ENABLED` 后，镜像目录同时就是沙箱看到的 `/workspace/myspace/{uid}`，因此"文件在镜像里"**不等于**"已登记进我的空间"——判定必须以 `artifacts` 记录为准。清空镜像目录前先确认对账已完成，否则未登记的文件会真的丢失；历史欠账用 `scripts/reconcile_myspace_mirror.py` 对齐。
+> ⚠️ 开启 `OPENSANDBOX_MYSPACE_BIND_MOUNT_ENABLED` 后，镜像目录同时就是沙箱看到的 `/workspace/myspace/{uid}`，因此"文件在镜像里"**不等于**"已登记进我的空间"——判定必须以 `artifacts` 记录为准。清空镜像目录前先确认登记已完成，否则未登记的文件会真的丢失；历史欠账用 `scripts/reconcile_myspace_mirror.py` 一次性对齐。
 
 ## 最佳实践
 

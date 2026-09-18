@@ -15,7 +15,12 @@ from fastapi.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from core.config.settings import settings
-from core.infra.logging import get_logger, generate_trace_id, LogContext
+from core.infra.logging import (
+    LogContext,
+    generate_trace_id,
+    get_logger,
+    is_quiet_access_log,
+)
 
 logger = get_logger(__name__)
 
@@ -64,12 +69,6 @@ class LoggingMiddleware:
         status_code = 0
 
         with LogContext(trace_id=trace_id, user_id=user_id, chat_id=chat_id):
-            logger.info(
-                "request_started",
-                method=request.method,
-                path=request.url.path,
-                client_ip=request.client.host if request.client else None,
-            )
 
             async def send_wrapper(message: dict) -> None:
                 nonlocal status_code
@@ -101,11 +100,12 @@ class LoggingMiddleware:
                 raise
             finally:
                 duration = time.time() - start_time
-                if status_code:
+                if status_code and not is_quiet_access_log(scope.get("endpoint")):
                     logger.info(
                         "request_completed",
                         method=request.method,
                         path=request.url.path,
+                        client_ip=request.client.host if request.client else None,
                         status_code=status_code,
                         latency=duration,
                     )

@@ -7,6 +7,8 @@ import {
 } from '@ant-design/icons';
 import { useAutomationStore } from '../../stores/automationStore';
 import { useCatalogStore } from '../../stores/catalogStore';
+import { abilitySlug } from '../../routing/subPages';
+import { useRouteSubs } from '../../routing/usePanel';
 import { useChatStore } from '../../stores/chatStore';
 import { useProjectStore } from '../../stores/projectStore';
 import { usePluginStore } from '../../stores/pluginStore';
@@ -44,8 +46,7 @@ async function startAutomationCreationInChat() {
 
   if (!plugin) {
     message.info(t('首次通过对话创建定时任务需要安装插件，请先在能力中心 → 插件里安装后再创建'));
-    useCatalogStore.getState().setAbilityTab('plugins');
-    useCatalogStore.getState().setPanel('ability_center');
+    useCatalogStore.getState().setPanel('ability_center', abilitySlug('plugins'));
     return;
   }
 
@@ -71,13 +72,12 @@ export function AutomationPanel() {
     loading,
     availabilityWarning,
     createModalOpen,
-    selectedTaskId,
     fetchTasks,
     setCreateModalOpen,
     setSelectedTaskId,
   } = useAutomationStore();
-  const panel = useCatalogStore((s) => s.panel);
-  const panelEntryNonce = useCatalogStore((s) => s.panelEntryNonce);
+  // 任务详情是一页：/automation/<任务id>，可直接分享给同事
+  const routeTaskId = useRouteSubs()[0] ?? null;
 
   const { title, subtitle } = usePanelHeader('automation', {
     title: '定时任务',
@@ -92,13 +92,6 @@ export function AutomationPanel() {
   useEffect(() => {
     void fetchTasks();
   }, [fetchTasks]);
-
-  // 重新进入本面板时回到列表——与 AgentPanel / SkillsPage / McpPage 用的是同一套
-  // `panelEntryNonce` 约定，这样侧边栏（以及任何别的导航入口）不必知道本功能的存在。
-  useEffect(() => {
-    if (panel !== 'automation') return;
-    setSelectedTaskId(null);
-  }, [panel, panelEntryNonce, setSelectedTaskId]);
 
   const showListSkeleton = useDelayedFlag(loading && tasks.length === 0);
 
@@ -136,10 +129,10 @@ export function AutomationPanel() {
   }, [tasks, keyword, sortKey]);
 
   // ── 详情页（替换整页，保持原有行为） ──
-  if (selectedTaskId) {
+  if (routeTaskId) {
     return (
       <AutomationDetailPage
-        taskId={selectedTaskId}
+        taskId={routeTaskId}
         onBack={() => {
           setSelectedTaskId(null);
           void fetchTasks();

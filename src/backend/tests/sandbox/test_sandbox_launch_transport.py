@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import os
 import shutil
 import sys
 
@@ -194,3 +195,71 @@ def test_the_runner_really_confines_a_command_end_to_end(monkeypatch, tmp_path):
     blocked = _run(f"echo nope > {outside}/written.txt")
     assert blocked["exit_code"] != 0
     assert not (outside / "written.txt").exists()
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32" or server._BASH_EXECUTABLE is None,
+    reason="真机验证需要 Windows 与 Git Bash",
+)
+def test_the_runner_really_confines_git_bash_on_windows(monkeypatch, tmp_path):
+    """The Windows twin of the test above, and the one that catches the failure
+    the plan-level tests cannot: the restricted-token design passed all of them
+    and still could not start bash at all (MSYS2 stamps its own security
+    descriptor on its startup pipe, which no restricting SID ever matched).
+    """
+    from services.script_runner_service.runtime_tools import windows_tool_path_entries
+
+    monkeypatch.setenv("DEPLOY_PROFILE", "local")
+    monkeypatch.setitem(
+        server.SAFE_ENV, "PATH", os.pathsep.join(windows_tool_path_entries(server._BASH_EXECUTABLE))
+    )
+    workspace = tmp_path / "ws"
+    outside = tmp_path / "outside"
+    (workspace / ".git").mkdir(parents=True)
+    (workspace / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+    outside.mkdir()
+
+    launch = confine(
+        build_policy(LocalAccessDecision(approval_mode="ask", writable_roots=(str(workspace),))),
+        build_context(workspace_root=str(workspace)),
+    )
+    wire = server.SandboxLaunch(**launch.to_json())
+
+    def _run(script: str) -> dict:
+        script_path = workspace / "probe.sh"
+        script_path.write_text(script, encoding="utf-8")
+        return asyncio.run(
+            server._execute_subprocess(
+                cmd=[server._BASH_EXECUTABLE, str(script_path)],
+                stdin_data="{}",
+                timeout=30,
+                cwd=str(workspace),
+                sandbox_launch=wire,
+            )
+        )
+
+    inside = _run(
+        "ls . | grep -c . > /dev/null && bash -c 'echo nested' && "
+        "echo ok > written.txt && echo t > /tmp/t.txt && cat written.txt"
+    )
+    assert inside["exit_code"] == 0, inside
+    assert inside["stdout"].split() == ["nested", "ok"]
+
+    for target in (f"$(cygpath '{outside}')/written.txt", ".git/written.txt"):
+        blocked = _run(f'echo nope > "{target}"')
+        assert blocked["exit_code"] != 0, blocked
+    assert not (outside / "written.txt").exists()
+    assert not (workspace / ".git" / "written.txt").exists()
+
+    # A one-off grant is one-off: the label it needed leaves with the plan.
+    granted = confine(
+        build_policy(
+            LocalAccessDecision(approval_mode="ask", writable_roots=(str(workspace), str(outside)))
+        ),
+        build_context(workspace_root=str(workspace)),
+    )
+    wire = server.SandboxLaunch(**granted.to_json())
+    assert _run(f"echo once > \"$(cygpath '{outside}')/once.txt\"")["exit_code"] == 0
+    wire = server.SandboxLaunch(**launch.to_json())
+    assert _run(f"echo again > \"$(cygpath '{outside}')/again.txt\"")["exit_code"] != 0
+    assert (outside / "once.txt").exists() and not (outside / "again.txt").exists()

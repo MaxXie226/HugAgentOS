@@ -1161,7 +1161,6 @@ async def create_agent_executor(
                     _sticky_plugins.resolve_sticky_plugin_capabilities,
                     user_id=str(current_user_id),
                     chat_id=chat_id,
-                    allow_unavailable=True,
                 ),
                 asyncio.to_thread(
                     _sticky_direct.resolve_session_activated_capabilities,
@@ -1513,7 +1512,6 @@ async def create_agent_executor(
 
         _desktop_progressive = await asyncio.to_thread(
             _desktop_plugins.resolve_desktop_progressive_plugins,
-            allow_unavailable=True,
             user_id=str(current_user_id or ""),
             enabled_skill_ids=(
                 enabled_skill_ids
@@ -1557,140 +1555,110 @@ async def create_agent_executor(
 
     _log.info("[factory] +%s progressive definitions resolved", _elapsed())
 
-    with capability_runtime.executor_assembly(
-        _capability_run_key, str(current_user_id or ""), capability_scope
+    _prepared_capabilities = None
+    if capabilities_enabled() and not disable_tools:
+        _caps_loader = get_skill_loader()
+        _caps_skill_ids = (
+            enabled_skill_ids
+            if enabled_skill_ids is not None
+            else _effective_main_available_skills()
+        )
+        def _materialize_selected_skills():
+            for _sid in _caps_skill_ids or []:
+                from core.capabilities.errors import CapabilityError
+
+                try:
+                    _caps_loader.get_skill_dir(_sid)
+                except (CapabilityError, OSError, ValueError):
+                    _note_unavailable(f"技能「{_sid}」的本机文件暂不可用。")
+
+        await asyncio.to_thread(_materialize_selected_skills)
+        _log.info("[factory] +%s selected skill files ready", _elapsed())
+        _dependency_plugins = [
+            *list(getattr(user_agent, "plugin_ids", None) or []),
+            *_sticky_plugin_ids,
+            *_mode_plugin_ids,
+        ]
+        if _required_plugin_id:
+            _dependency_plugins.append(_required_plugin_id)
+        _prepared_capabilities = await asyncio.to_thread(
+            capability_runtime.prepare,
+            _capability_run_key,
+            str(current_user_id or ""),
+            skill_ids=_caps_skill_ids,
+            scope_id=capability_scope,
+            agent_definition=user_agent,
+            plugin_ids=list(dict.fromkeys(_dependency_plugins)),
+        )
+
+    _log.info("[factory] +%s capability snapshot prepared", _elapsed())
+
+    _required_connector_server_keys = _required_mcp_server_keys(
+        _required_connector_ids,
+        enabled_mcp_keys,
+    )
+    _required_plugin_server_keys = _required_mcp_server_keys(
+        _required_plugin_mcp_ids,
+        enabled_mcp_keys,
+    )
+    if _required_connector_ids and not _required_connector_server_keys:
+        _note_unavailable(
+            "所选连接器当前不可用或未获授权：" + ", ".join(_required_connector_ids)
+        )
+    if (
+        _required_plugin_id
+        and _required_plugin_mcp_ids
+        and not _required_plugin_server_keys
+        and not _required_plugin_skill_ids
     ):
-        _prepared_capabilities = None
-        if capabilities_enabled() and not disable_tools:
-            from core.capabilities import runtime as capability_runtime
-
-            _caps_loader = get_skill_loader()
-            _caps_skill_ids = (
-                enabled_skill_ids
-                if enabled_skill_ids is not None
-                else _effective_main_available_skills()
-            )
-            def _materialize_selected_skills():
-                for _sid in _caps_skill_ids or []:
-                    from core.capabilities.errors import CapabilityError
-
-                    try:
-                        _caps_loader.get_skill_dir(_sid)
-                    except (CapabilityError, OSError, ValueError):
-                        _note_unavailable(f"技能「{_sid}」的本机文件暂不可用。")
-
-            await asyncio.to_thread(_materialize_selected_skills)
-            _log.info("[factory] +%s selected skill files ready", _elapsed())
-            _dependency_plugins = [
-                *list(getattr(user_agent, "plugin_ids", None) or []),
-                *_sticky_plugin_ids,
-                *_mode_plugin_ids,
-            ]
-            if _required_plugin_id:
-                _dependency_plugins.append(_required_plugin_id)
-            _prepared_capabilities = await asyncio.to_thread(
-                capability_runtime.prepare,
-                _capability_run_key,
-                str(current_user_id or ""),
-                skill_ids=_caps_skill_ids,
-                scope_id=capability_scope,
-                agent_definition=user_agent,
-                plugin_ids=list(dict.fromkeys(_dependency_plugins)),
-                allow_unavailable=True,
-            )
-
-        _log.info("[factory] +%s capability snapshot prepared", _elapsed())
-
-        _required_connector_server_keys = _required_mcp_server_keys(
-            _required_connector_ids,
-            enabled_mcp_keys,
+        _note_unavailable(f"所选插件「{_required_plugin_name}」的连接器当前不可用。")
+    enabled_servers = _filter_mcp_servers_by_keys(
+        enabled_mcp_keys,
+        owned_servers=owned_mcp_servers,
+        bridge_servers=bridge_mcp_servers,
+    )
+    if _prepared_capabilities is not None:
+        enabled_servers = await asyncio.to_thread(
+            capability_runtime.bind_mcp,
+            _prepared_capabilities,
+            enabled_servers,
+            _capability_mcp_resolution[0] if _capability_mcp_resolution else None,
         )
-        _required_plugin_server_keys = _required_mcp_server_keys(
-            _required_plugin_mcp_ids,
-            enabled_mcp_keys,
-        )
-        if _required_connector_ids and not _required_connector_server_keys:
-            _note_unavailable(
-                "所选连接器当前不可用或未获授权：" + ", ".join(_required_connector_ids)
-            )
-        if (
-            _required_plugin_id
-            and _required_plugin_mcp_ids
-            and not _required_plugin_server_keys
-            and not _required_plugin_skill_ids
-        ):
-            _note_unavailable(f"所选插件「{_required_plugin_name}」的连接器当前不可用。")
-        enabled_servers = _filter_mcp_servers_by_keys(
-            enabled_mcp_keys,
-            owned_servers=owned_mcp_servers,
-            bridge_servers=bridge_mcp_servers,
-        )
-        if _prepared_capabilities is not None:
-            enabled_servers = await asyncio.to_thread(
-                capability_runtime.bind_mcp,
-                _prepared_capabilities,
-                enabled_servers,
-                _capability_mcp_resolution[0] if _capability_mcp_resolution else None,
-            )
 
-        if _prepared_capabilities is not None:
-            _dependency_plugins = [
-                *list(getattr(user_agent, "plugin_ids", None) or []),
-                *_sticky_plugin_ids,
-                *_mode_plugin_ids,
-            ]
-            if _required_plugin_id:
-                _dependency_plugins.append(_required_plugin_id)
-            # Committed this turn: a slash-command skill, an explicitly invoked
-            # plugin's skills, and anything the model already called. Those must
-            # stop the turn when unusable; the rest of the catalog must not.
-            _catalog_skill_ids = set(_caps_skill_ids or [])
-            _committed_skill_ids = [
-                sid
-                for sid in dict.fromkeys(
-                    [
-                        *([_required_skill_id] if _required_skill_id else []),
-                        *_required_plugin_skill_ids,
-                        *_sticky_direct_skill_ids,
-                        *(invoked_skill_ids or []),
-                    ]
-                )
-                if sid in _catalog_skill_ids
-            ]
-            _prepared_capabilities = await asyncio.to_thread(
-                capability_runtime.preflight,
-                _prepared_capabilities,
-                skill_ids=_committed_skill_ids,
-                catalog_skill_ids=_caps_skill_ids,
-                agent_definition=user_agent,
-                plugin_ids=list(dict.fromkeys(_dependency_plugins)),
-                available_mcp=set(enabled_servers),
-                available_kb=set(enabled_kb_ids or []),
-                plugin_nodes=(
-                    [node for p in _desktop_progressive.directory for node in p.capability_nodes]
-                    if _desktop_progressive is not None
-                    else []
-                ),
+    if _prepared_capabilities is not None:
+        _dependency_plugins = [
+            *list(getattr(user_agent, "plugin_ids", None) or []),
+            *_sticky_plugin_ids,
+            *_mode_plugin_ids,
+        ]
+        if _required_plugin_id:
+            _dependency_plugins.append(_required_plugin_id)
+        _prepared_capabilities = await asyncio.to_thread(
+            capability_runtime.preflight,
+            _prepared_capabilities,
+            plugin_ids=list(dict.fromkeys(_dependency_plugins)),
+            available_mcp=set(enabled_servers),
+            available_kb=set(enabled_kb_ids or []),
+        )
+        _log.info("[factory] +%s capability preflight completed", _elapsed())
+        _unusable_skill_ids = {
+            str(row.get("skill_id"))
+            for row in _prepared_capabilities.dependency_report.get("unavailable_skills") or []
+        }
+        _unusable_skill_ids.update(
+            set(_caps_skill_ids or []) - set(_prepared_capabilities.bindings)
+        )
+        for _name, _reason in _prepared_capabilities.unavailable.items():
+            _note_unavailable(f"能力「{_name}」暂不可用（{_reason}）。")
+        if _unusable_skill_ids:
+            _log.info(
+                "[factory] 本轮不提供依赖未满足的技能：%s",
+                ", ".join(sorted(_unusable_skill_ids)),
             )
-            _log.info("[factory] +%s capability preflight completed", _elapsed())
-            _unusable_skill_ids = {
-                str(row.get("skill_id"))
-                for row in _prepared_capabilities.dependency_report.get("unavailable_skills") or []
-            }
-            _unusable_skill_ids.update(
-                set(_caps_skill_ids or []) - set(_prepared_capabilities.bindings)
-            )
-            for _name, _reason in _prepared_capabilities.unavailable.items():
-                _note_unavailable(f"能力「{_name}」暂不可用（{_reason}）。")
-            if _unusable_skill_ids:
-                _log.info(
-                    "[factory] 本轮不提供依赖未满足的技能：%s",
-                    ", ".join(sorted(_unusable_skill_ids)),
-                )
-                _caps_skill_ids = [
-                    s for s in (_caps_skill_ids or []) if s not in _unusable_skill_ids
-                ]
-                enabled_skill_ids = list(_caps_skill_ids)
+            _caps_skill_ids = [
+                s for s in (_caps_skill_ids or []) if s not in _unusable_skill_ids
+            ]
+            enabled_skill_ids = list(_caps_skill_ids)
 
     _desktop_prepared_servers = dict(enabled_servers)
     if _desktop_progressive is not None:
@@ -2135,7 +2103,6 @@ async def create_agent_executor(
                 chat_id=chat_id,
                 sandbox_session_id=_sbx_sess,
                 user_id=current_user_id,
-                interactive=_interactive,
                 scope=_proj_scope,
             )
         if not read_only:
@@ -2414,7 +2381,7 @@ async def create_agent_executor(
         # that and receive backend-path content unusable in the sandbox — so the
         # schema is pure per-round prefill waste plus a wrong door.
         _visible_mcps = [*mcp_clients, *http_clients]
-        if _prepared_capabilities is not None and _prepared_capabilities.allow_unavailable:
+        if _prepared_capabilities is not None:
             from core.llm.capability_tools import AvailableMCPClient
 
             _live_run = (

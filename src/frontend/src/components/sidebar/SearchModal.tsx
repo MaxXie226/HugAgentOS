@@ -6,8 +6,8 @@ import {
   SearchOutlined, CloseOutlined, EditOutlined,
 } from '@ant-design/icons';
 import { useUIStore, useChatStore, useAutomationChatStore } from '../../stores';
+import { usePanel } from '../../routing/usePanel';
 import type { HistoryTimeFilter } from '../../stores/uiStore';
-import { useCatalogStore } from '../../stores/catalogStore';
 import {
   matchesTimeFilter, getHistoryGroupKey, isAutomationHistoryChat,
   buildSidebarChatItems,
@@ -98,7 +98,7 @@ export function SearchModal({ onNewChat, onSelectChat, onSelectSearchResult }: S
   const storeOrder = useChatStore((s) => s.store.order);
   const storeChats = useChatStore((s) => s.store.chats);
   const currentChatId = useChatStore((s) => s.currentChatId);
-  const panel = useCatalogStore((s) => s.panel);
+  const panel = usePanel();
   const sidebarTasks = useAutomationChatStore((s) => s.sidebarTasks);
   const sidebarPrefs = useAutomationChatStore((s) => s.sidebarPrefs);
   const activeAutoTaskId = useAutomationChatStore((s) => s.activeGroup?.taskId);

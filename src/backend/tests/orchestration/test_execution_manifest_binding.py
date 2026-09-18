@@ -9,6 +9,7 @@ import sys
 from types import SimpleNamespace
 
 import pytest
+from orchestration.memory_integration import SessionMemory
 
 
 @pytest.mark.asyncio
@@ -52,7 +53,7 @@ async def test_main_streaming_propagates_unknown_tool_outcome_after_partial_text
         )
 
     async def no_memory(*_args, **_kwargs):
-        return None
+        return SessionMemory(chat_id="", scope_user_id="", workspace_id="default", memory_enabled=False)
 
     async def no_identity(_user_id):
         return ""
@@ -74,7 +75,7 @@ async def test_main_streaming_propagates_unknown_tool_outcome_after_partial_text
     monkeypatch.setattr(builtin_subagents, "merge_builtin_subagents", lambda *_a, **_kw: [])
     monkeypatch.setattr(compaction_service, "maybe_run_pre_turn_compaction", no_compaction)
     monkeypatch.setattr(workflow, "create_agent_executor", create_agent)
-    monkeypatch.setattr(workflow, "launch_memory_retrieval", no_memory)
+    monkeypatch.setattr(workflow, "open_session_memory", no_memory)
     monkeypatch.setattr(workflow, "build_user_identity_block", no_identity)
     monkeypatch.setattr(workflow, "anchor_start_for_chat", lambda _chat_id: 0)
     monkeypatch.setattr(workflow, "enabled_skill_ids_from_context", lambda _ctx: [])
@@ -118,10 +119,10 @@ async def test_main_streaming_forwards_run_and_workspace_to_agent_factory(monkey
         raise StopAtFactory
 
     async def _no_memory(*_args, **_kwargs):
-        return None
+        return SessionMemory(chat_id="", scope_user_id="", workspace_id="default", memory_enabled=False)
 
     monkeypatch.setattr(workflow, "create_agent_executor", _fake_create_agent_executor)
-    monkeypatch.setattr(workflow, "launch_memory_retrieval", _no_memory)
+    monkeypatch.setattr(workflow, "open_session_memory", _no_memory)
     monkeypatch.setattr(workflow, "anchor_start_for_chat", lambda _chat_id: 0)
     monkeypatch.setattr(workflow, "enabled_skill_ids_from_context", lambda _ctx: [])
     monkeypatch.setattr(workflow, "enabled_mcp_ids_from_context", lambda _ctx: [])
@@ -163,6 +164,7 @@ from core.db.engine import Base, engine
 from core.evolution.runtime_binding import reset_for_tests, resolve_bundle_for_run
 from core.llm import agent_factory, builtin_subagents
 from orchestration import workflow
+from orchestration.memory_integration import SessionMemory
 
 Base.metadata.create_all(engine)
 
@@ -194,10 +196,10 @@ async def verifying_factory(**kwargs):
     raise BoundAfterFactory
 
 async def no_memory(*_args, **_kwargs):
-    return None
+    return SessionMemory(chat_id="", scope_user_id="", workspace_id="default", memory_enabled=False)
 
 workflow.create_agent_executor = verifying_factory
-workflow.launch_memory_retrieval = no_memory
+workflow.open_session_memory = no_memory
 workflow.anchor_start_for_chat = lambda _chat_id: 0
 workflow.enabled_skill_ids_from_context = lambda _ctx: []
 workflow.enabled_mcp_ids_from_context = lambda _ctx: []

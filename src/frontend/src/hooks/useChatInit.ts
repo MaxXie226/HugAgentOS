@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import { t } from '../i18n';
 import { authFetch, checkSession, listActiveBatchPlans, getBatchPlan, chatTargetHeaders, isHybridDual, isLocalChat, registerLocalChat, toPlanProgress, LOCAL_TARGET_HEADER } from '../api';
 import { newDraftChatId, saveCatalog } from '../storage';
+import { usePanel } from '../routing/usePanel';
 import { buildHistorySegments } from '../utils/segments';
 import { attachArtifactsToToolCalls } from '../utils/fileParser';
 import { preservedChatsOnRebuild } from '../utils/sessionRebuild';
@@ -10,7 +11,7 @@ import { mergeHistoryPage } from '../utils/historyMerge';
 import { stripMcpToolPrefix } from '../utils/constants';
 import { parseContextCompactionState, parseContextUsageSnapshot } from '../utils/contextUsage';
 import { shouldRestorePlanModeFromHistory } from '../utils/chatMode';
-import { isLocalDraftChat, LOGIN_LANDING_KEY, useAuthStore, useSettingsStore, useUIStore, useChatStore, useCatalogStore, useAutomationChatStore, useBatchStore, useSidebarOrderStore } from '../stores';
+import { isLocalDraftChat, useAuthStore, useSettingsStore, useUIStore, useChatStore, useCatalogStore, useAutomationChatStore, useBatchStore, useSidebarOrderStore } from '../stores';
 import { useDeploymentModeStore } from '../stores/deploymentModeStore';
 import type { Catalog, ChatItem, ChatMessage, CitationItem, EvolutionSummary, OntologyGovernanceSummary, StoredSegment, ThinkingBlock, ToolCall, UpdateEntry, BatchPlanMeta, BatchSourceType, BatchItemResult, ReferencedChatCard } from '../types';
 
@@ -517,13 +518,14 @@ export function useChatInit() {
   const { loadMemorySettings, loadOntologySettings } = useSettingsStore();
   const { setFeatureUpdates } = useUIStore();
   const {
-    updateStore, setCurrentChatId, setChatsLoading, setToolDisplayNames,
+    updateStore, adoptChatFromUrl, setChatsLoading, setToolDisplayNames,
     addBackendSessionId, clearBackendSessionIds,
     clearLoadedMsgIds,
     currentChatId, sessionLoadEpoch, bumpSessionLoadEpoch,
     hydrateForUser,
   } = useChatStore();
-  const { catalog, setCatalog, setCatalogLoading, panel, setPanel } = useCatalogStore();
+  const { catalog, setCatalog, setCatalogLoading } = useCatalogStore();
+  const panel = usePanel();
 
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -707,28 +709,19 @@ export function useChatInit() {
             };
           });
 
-          // On a fresh login (SSO ticket exchange) always land on the home page
-          // (chat panel + a brand-new empty chat → recommend banner). On a plain
-          // browser refresh, restore the previously-selected chat and keep the
-          // user on whichever panel they were on (sub-agents / knowledge base / app center / my space, etc.).
-          const isFreshLogin = typeof window !== 'undefined'
-            && window.sessionStorage.getItem(LOGIN_LANDING_KEY) === '1';
           const allChats = { ...chats };
-          // 恢复目标：非新登录一律保留原会话 id（问题14/17）。后端已有 → 恢复
-          // 历史；后端没有（正在流式输出首条消息、或本地空会话）→ 保留同一 id：
-          // 空会话渲染出来就是空首页，与生成新 id 的 UX 等价，但指针稳定——
-          // 不会把新 id 写回共享 localStorage 去覆盖别的标签页的恢复目标。
-          const targetChatId = isFreshLogin ? newDraftChatId(authUserId) : (prevChatId || newDraftChatId(authUserId));
-          if (isFreshLogin) setPanel('chat');
-          setCurrentChatId(targetChatId);
+          // 恢复目标就是地址栏指的那段会话（prevChatId 已由 hydrateForUser 从地址读出）。
+          // 后端已有 → 恢复历史；后端没有（正在流式输出首条消息、或本地会话还没并进来）
+          // → 保留同一 id，空会话渲染出来就是空首页。
+          //
+          // 用 adopt 而不是 setCurrentChatId：这里的输入本来就来自地址栏，再走一遍
+          // 写地址的动作，会在会话列表尚未合并完时把「还没进历史」误判成草稿，
+          // 把用户刚点开的那条链接退回首页。
+          const targetChatId = prevChatId || newDraftChatId(authUserId);
+          adoptChatFromUrl(targetChatId);
           // Bump epoch so the lazy-load messages effect re-fires even when
-          // currentChatId hasn't changed (e.g. page refresh restores the
-          // same chat ID from localStorage).
+          // currentChatId hasn't changed (e.g. the same chat id is restored from the URL).
           bumpSessionLoadEpoch();
-          // Clean up legacy login landing flag if present
-          if (typeof window !== 'undefined') {
-            window.sessionStorage.removeItem(LOGIN_LANDING_KEY);
-          }
 
           // Pre-load messages for the target chat BEFORE clearing chatsLoading,
           // so the user never sees the empty home page flash.

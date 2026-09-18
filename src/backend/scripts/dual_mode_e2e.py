@@ -506,7 +506,7 @@ async def main():
     values=json.loads(sys.stdin.read())
     run_id="offline-"+values["skill_id"]
     run=runtime.prepare(run_id,values["user_id"],skill_ids=[values["skill_id"]])
-    runtime.preflight(run,skill_ids=[values["skill_id"]])
+    runtime.preflight(run)
     result=await ScriptRunnerProvider().execute(ExecuteRequest(
         script_content="from pathlib import Path\\nprint(Path("+repr("/workspace/skills/"+values["skill_id"]+"/marker.txt")+").read_text())",
         script_name="offline_marker.py", user_id=values["user_id"],

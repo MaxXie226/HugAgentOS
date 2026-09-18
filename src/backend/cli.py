@@ -850,7 +850,9 @@ def cmd_serve(args) -> int:
     print(f"HugAgentOS 监听于 http://{host}:{port}/  (Ctrl-C 停止)")
     if not args.no_browser:
         threading.Thread(target=_open_browser_when_ready, args=(port,), daemon=True).start()
-    uvicorn.run(app, host=host, port=port, log_level="info")
+    # 访问日志由 LoggingMiddleware 统一输出（带 trace_id、耗时、状态码），
+    # uvicorn 自带的那条是同一次请求的第二份记录，关掉避免日志翻倍。
+    uvicorn.run(app, host=host, port=port, log_level="info", access_log=False)
     return 0
 
 

@@ -116,25 +116,11 @@ def test_runtime_preflight_blocks_declared_mcp_and_agent_kb(durable_index, caps_
         "needs-search", files={"SKILL.md": body}, content_hash=skill_content_hash(body, {})
     )
     run = runtime.prepare("needs-run", "u", skill_ids=["needs-search"])
-    with pytest.raises(dependency.DependencyMissing):
-        runtime.preflight(run, skill_ids=["needs-search"], available_mcp=[])
-    definition = agents.AgentDefinition(agent_id="writer", name="Writer", kb_ids=["kb-private"])
-    with pytest.raises(dependency.DependencyMissing):
-        runtime.preflight(
-            run,
-            skill_ids=["needs-search"],
-            agent_definition=definition,
-            available_mcp=["search"],
-            available_kb=[],
-        )
-    ready = runtime.preflight(
-        run,
-        skill_ids=["needs-search"],
-        agent_definition=definition,
-        available_mcp=["search"],
-        available_kb=["kb-private"],
-    )
-    assert ready.dependency_report["ready"]
+    blocked = runtime.preflight(run, available_mcp=[])
+    assert blocked.unavailable["needs-search"] == "dependency_missing"
+    usable = runtime.prepare("needs-ready", "u", skill_ids=["needs-search"])
+    ready = runtime.preflight(usable, available_mcp=["search"], available_kb=["kb-private"])
+    assert ready.dependency_report["ready"] and not ready.unavailable
 
 
 def test_plugin_closure_replay_keeps_original_definition_revision(
@@ -149,7 +135,7 @@ def test_plugin_closure_replay_keeps_original_definition_revision(
             name, files={"SKILL.md": name}, content_hash=skill_content_hash(name, {})
         )
     original = plugin("pack", {"skills": ["first"]}, version="1")
-    run = runtime.prepare("plugin-run", "u", skill_ids=[])
+    run = runtime.prepare("plugin-run", "u", skill_ids=["first"], plugin_ids=["pack"])
     pinned = runtime.preflight(run, plugin_ids=["pack"])
     plugin("pack", {"skills": ["second"]}, version="2")
     replay = runtime.preflight(runtime.get("plugin-run"), plugin_ids=["pack"])
@@ -157,14 +143,20 @@ def test_plugin_closure_replay_keeps_original_definition_revision(
         "plugin:local:pack",
         "skill:local:first",
     }
-    assert replay.dependency_report["nodes"][0]["revision"] == original.resolved_revision
+    pinned_plugin = next(
+        node
+        for node in replay.dependency_report["nodes"]
+        if node["install_id"] == "plugin:local:pack"
+    )
+    assert pinned_plugin["revision"] == original.resolved_revision
     assert runtime.references("plugin", "local", "pack", original.resolved_revision) == [
         "plugin-run"
     ]
     plugins.remove_local_plugin("pack")
     assert registry.get("plugin:local:pack").state == "removed"
-    with pytest.raises(Exception):
-        runtime.validate(replay)
+    # 插件被卸载之后不能再当作可用：重建视图时，靠它成立的技能一并被摘掉。
+    runtime.rebuild(replay)
+    assert runtime.get("plugin-run").unavailable["first"] == "permission_denied"
 
 
 def test_agent_preserves_and_checks_declared_platform_extensions(index_db, caps_root):
@@ -261,19 +253,11 @@ def test_catalog_skill_with_missing_connector_is_dropped_not_fatal(
         )
     run = runtime.prepare("catalog-run", "u", skill_ids=["plain", "needy"])
 
-    offered = runtime.preflight(run, catalog_skill_ids=["plain", "needy"], available_mcp=[])
+    offered = runtime.preflight(run, available_mcp=[])
     report = offered.dependency_report
     assert report["ready"]
     assert [row["skill_id"] for row in report["unavailable_skills"]] == ["needy"]
     assert {node["install_id"] for node in report["nodes"]} == {"skill:local:plain"}
-
-    # Committing to the same skill still stops the turn: an explicit selection
-    # is a promise the run cannot keep.
-    chosen = runtime.prepare("chosen-run", "u", skill_ids=["plain", "needy"])
-    with pytest.raises(dependency.DependencyMissing):
-        runtime.preflight(
-            chosen, skill_ids=["needy"], catalog_skill_ids=["plain", "needy"], available_mcp=[]
-        )
 
 
 def test_snapshot_missing_or_removed_skill_is_rejected(index_db, caps_root):
@@ -342,11 +326,6 @@ def test_parallel_eligibility_and_catalog_match_serial(durable_index, caps_root,
     monkeypatch.setattr(readiness, "os", SimpleNamespace(name="nt"))
     assert readiness.eligible_skill_candidates(candidates, "u") == serial
     names = ["item-%s" % i for i in range(8)]
-    run = runtime.prepare("serial-catalog", "u", skill_ids=names)
-    first = runtime.preflight(run, catalog_skill_ids=names, available_models=set())
-    runtime._catalog_probes.clear()
-    monkeypatch.setattr(runtime, "os", SimpleNamespace(name="nt"))
-    run = runtime.prepare("parallel-catalog", "u", skill_ids=names)
-    second = runtime.preflight(run, catalog_skill_ids=names, available_models=set())
-    assert first.dependency_report == second.dependency_report
-    assert second.dependency_report["unavailable_skills"][0]["skill_id"] == "item-7"
+    run = runtime.prepare("catalog", "u", skill_ids=names)
+    report = runtime.preflight(run, available_models=set()).dependency_report
+    assert [row["skill_id"] for row in report["unavailable_skills"]] == ["item-7"]

@@ -9,6 +9,9 @@ code path ever answers "could not confine" with an unconfined command.
 from __future__ import annotations
 
 import os
+import sys
+import types
+from collections import Counter
 from unittest.mock import patch
 
 import pytest
@@ -27,13 +30,18 @@ from core.sandbox.oslayer import (
     build_filesystem_policy,
     build_launch,
     get_platform_backend,
+    windows_runtime,
 )
 from core.sandbox.oslayer.bwrap import BubblewrapBackend, resolve_bwrap
 from core.sandbox.oslayer.seatbelt import SeatbeltBackend
-from core.sandbox.oslayer.win32.caps import capability_sids_for_roots, readonly_capability_sid
-from core.sandbox.oslayer.windows_runtime import TEMP_ENV_KEYS, child_environment
+from core.sandbox.oslayer.windows_runtime import (
+    TEMP_ENV_KEYS,
+    LabeledRoots,
+    child_environment,
+    root_key,
+)
 from core.sandbox.oslayer.windows_token import (
-    WindowsRestrictedTokenBackend,
+    WindowsLowIntegrityBackend,
     build_plan,
     scratch_directory,
 )
@@ -305,7 +313,7 @@ def test_seatbelt_carves_protected_metadata_out_of_the_write_grant(tmp_path):
 
 def test_windows_refuses_a_policy_it_cannot_enforce(tmp_path):
     """Read denials and network blocks have no unelevated mechanism; say so."""
-    backend = WindowsRestrictedTokenBackend()
+    backend = WindowsLowIntegrityBackend()
     context = _context(tmp_path)
 
     restricted_network = SandboxPolicy(
@@ -326,7 +334,7 @@ def test_windows_refuses_a_policy_it_cannot_enforce(tmp_path):
 
 def test_windows_produces_a_spawn_plan_rather_than_a_wrapper(tmp_path):
     """A token cannot be an argv prefix, so Windows takes the other launch form."""
-    backend = WindowsRestrictedTokenBackend()
+    backend = WindowsLowIntegrityBackend()
     policy = SandboxPolicy(
         filesystem=build_filesystem_policy(writable_roots=[str(tmp_path)]),
         network=NetworkPolicy.ENABLED,
@@ -375,6 +383,59 @@ def test_the_plan_is_decided_before_it_crosses_the_boundary(tmp_path):
     assert "policy" not in plan and "filesystem" not in plan
 
 
+def test_a_carve_out_nothing_has_created_is_left_out_of_the_plan(tmp_path):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    context = _context(tmp_path)
+    resolved = build_filesystem_policy(writable_roots=[str(workspace)]).resolve(context)
+
+    plan = build_plan(resolved, context)
+
+    assert {root["path"]: root["read_only"] for root in plan["writable_roots"]}[
+        str(workspace)
+    ] == []
+
+
+def test_labels_follow_the_plan_and_leave_with_it(tmp_path, monkeypatch):
+    """A one-off grant must not stay writable for every later command."""
+    calls: list[tuple[str, str]] = []
+    stub = types.ModuleType("core.sandbox.oslayer.win32.label")
+    for name in ("label_writable", "label_read_only", "remove_label"):
+        setattr(stub, name, lambda path, _name=name: calls.append((_name, path)))
+    monkeypatch.setitem(sys.modules, "core.sandbox.oslayer.win32.label", stub)
+    monkeypatch.setattr(windows_runtime, "_IN_USE", Counter())
+    state = str(tmp_path / "state")
+    workspace, once, busy = (str(tmp_path / name) for name in ("ws", "once", "busy"))
+
+    windows_runtime.apply_labels(
+        {
+            "state_dir": state,
+            "writable_roots": [
+                {"path": workspace, "read_only": [workspace + "/.git"]},
+                {"path": once, "read_only": []},
+                {"path": busy, "read_only": []},
+            ],
+        }
+    )
+    assert calls == [
+        ("label_writable", workspace),
+        ("label_read_only", workspace + "/.git"),
+        ("label_writable", once),
+        ("label_writable", busy),
+    ]
+    assert LabeledRoots(state).load() == {root_key(p) for p in (workspace, once, busy)}
+
+    calls.clear()
+    windows_runtime._IN_USE[root_key(busy)] += 1
+    windows_runtime.apply_labels(
+        {"state_dir": state, "writable_roots": [{"path": workspace, "read_only": []}]}
+    )
+
+    # The one-off root is unlabeled; the one a running command still holds is not.
+    assert calls == [("remove_label", root_key(once)), ("label_writable", workspace)]
+    assert LabeledRoots(state).load() == {root_key(workspace), root_key(busy)}
+
+
 def test_windows_redirects_scratch_space_to_a_private_directory(tmp_path):
     """Granting the user's shared temp folder would be both slow and too broad."""
     workspace = tmp_path / "ws"
@@ -402,34 +463,6 @@ def test_a_read_only_plan_asks_for_no_scratch_space(tmp_path):
     assert "scratch_dir" not in plan
 
 
-# ── Windows capability SIDs ─────────────────────────────────────────────────
-
-
-def test_each_root_gets_its_own_stable_capability_sid(tmp_path):
-    """Two authorized folders must not lend each other write access."""
-    state = str(tmp_path / "state")
-    first = capability_sids_for_roots(state, [str(tmp_path / "a"), str(tmp_path / "b")])
-    assert first[str(tmp_path / "a")] != first[str(tmp_path / "b")]
-
-    # Stable across runs: the ACE written on the folder names a specific SID.
-    again = capability_sids_for_roots(state, [str(tmp_path / "a")])
-    assert again[str(tmp_path / "a")] == first[str(tmp_path / "a")]
-
-
-def test_capability_sids_ignore_windows_path_casing(tmp_path):
-    state = str(tmp_path / "state")
-    lower = capability_sids_for_roots(state, [str(tmp_path / "repo")])
-    upper = capability_sids_for_roots(state, [str(tmp_path / "repo").upper()])
-    if os.path.normcase("A") == os.path.normcase("a"):
-        assert list(lower.values()) == list(upper.values())
-
-
-def test_the_read_only_capability_sid_is_never_a_root_sid(tmp_path):
-    state = str(tmp_path / "state")
-    granted = capability_sids_for_roots(state, [str(tmp_path / "repo")])
-    assert readonly_capability_sid(state) not in granted.values()
-
-
 # ── Selection ───────────────────────────────────────────────────────────────
 
 
@@ -438,7 +471,7 @@ def test_the_read_only_capability_sid_is_never_a_root_sid(tmp_path):
     [
         ("macos", "seatbelt"),
         ("linux", "bwrap"),
-        ("windows", "windows_restricted_token"),
+        ("windows", "windows_low_integrity"),
     ],
 )
 def test_every_supported_platform_has_a_backend(platform, expected):

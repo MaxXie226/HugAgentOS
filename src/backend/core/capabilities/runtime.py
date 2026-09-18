@@ -8,10 +8,6 @@ explicit. Authorization is rechecked before exposing the frozen files.
 from __future__ import annotations
 
 import copy
-import os
-from concurrent.futures import ThreadPoolExecutor
-from contextvars import ContextVar, copy_context
-from contextlib import contextmanager
 import hashlib
 import json
 import threading
@@ -22,53 +18,17 @@ from typing import Any, Dict, Optional
 from core.db.models import ContentBlock
 
 from . import archive, registry, skills, store, view
-from .errors import IntegrityFailed, NameConflict, PackageMissing, PermissionDenied, ViewUnavailable
+from .errors import (
+    CapabilityError,
+    IntegrityFailed,
+    PackageMissing,
+    PermissionDenied,
+    ViewUnavailable,
+)
 from .paths import BUILTIN_PROFILE, KIND_SKILL, LOCAL_PROFILE, require_root, revision_for_hash
 
 _lock = threading.RLock()
 _PREFIX = "desktop_capability_run:"
-
-
-@dataclass
-class _AssemblyPass:
-    identity: tuple
-    bindings: Optional[dict] = None
-    mcps: Optional[dict] = None
-    pending_view: Optional[tuple] = None
-    enabled: bool = True
-
-
-_assembly_pass = ContextVar("executor_capability_assembly", default=None)
-
-
-@contextmanager
-def executor_assembly(run_id, user_id, scope_id=""):
-    """Internal factory transaction: publish only after the final full verification.
-
-    No global verification cache: the token follows this task's worker calls and
-    is invalidated on success, failure or cancellation. Independent API calls
-    keep their normal validation behavior.
-    """
-    assembly = _AssemblyPass((str(run_id), str(user_id), str(scope_id or "")))
-    token = _assembly_pass.set(assembly)
-    try:
-        yield
-    finally:
-        assembly.enabled = False
-        _assembly_pass.reset(token)
-
-
-def _assembly_for(run):
-    assembly = _assembly_pass.get()
-    if assembly is None or not assembly.enabled:
-        return None
-    if assembly.identity != (run.run_id, run.user_id, run.scope_id):
-        raise IntegrityFailed("capability assembly belongs to another run")
-    if assembly.bindings is not None and assembly.bindings != run.bindings:
-        raise IntegrityFailed("capability bindings changed during assembly")
-    if assembly.mcps is not None and assembly.mcps != run.mcp_bindings:
-        raise IntegrityFailed("connector bindings changed during assembly")
-    return assembly
 
 
 def _key(run_id):
@@ -106,9 +66,7 @@ class PreparedRun:
     authorization_fingerprint: Optional[str] = None
     dependency_report: dict = field(default_factory=dict)
     scope_id: str = ""
-    allow_unavailable: bool = False
     unavailable: dict = field(default_factory=dict)
-    view_revision: str = ""
 
     @property
     def view_dir(self):
@@ -116,11 +74,7 @@ class PreparedRun:
             require_root()
             / ".capabilities"
             / "views"
-            / (
-                _key(_snapshot_key(self.run_id, self.scope_id) + self.view_revision)
-                if self.view_revision
-                else _snapshot_key(self.run_id, self.scope_id)
-            )
+            / _snapshot_key(self.run_id, self.scope_id)
             / "skills"
         )
 
@@ -128,9 +82,7 @@ class PreparedRun:
         return {
             "run_id": self.run_id,
             "scope_id": self.scope_id,
-            "allow_unavailable": self.allow_unavailable,
             "unavailable": copy.deepcopy(self.unavailable),
-            "view_revision": self.view_revision,
             "user_id": self.user_id,
             "profile": self.profile,
             "execution_plane": self.execution_plane,
@@ -149,38 +101,19 @@ def get(run_id: str, scope_id: str = "") -> Optional[PreparedRun]:
 
 
 def _component(binding):
-    if binding.get("snapshot_path"):
-        from .paths import assert_managed_path
-
-        path = assert_managed_path(require_root() / binding["snapshot_path"])
-        if not (path / "SKILL.md").is_file():
-            return None
-        return store.StoredComponent(
-            KIND_SKILL, binding["profile"], binding["key"], binding["revision"], path
-        )
     return store.get(KIND_SKILL, binding["profile"], binding["key"], binding["revision"])
 
 
-def _validate_skill_binding(
-    name: str, binding: dict, run: PreparedRun, *, fresh: bool = True, installed=None
-) -> None:
+def _validate_skill_binding(name: str, binding: dict, run: PreparedRun) -> None:
     """Re-check one frozen skill: still authorized (enabled/owner) and its bytes
     intact (content hash). Runs on every enumeration so a mid-session disable or
     an out-of-band edit of the frozen file is caught before a read.
 
-    ``fresh=True`` re-reads every file from disk — the authoritative sweep at
-    view-build time and in direct recovery checks. ``fresh=False`` (the
-    per-enumeration hot path) reuses the content-addressed hash cache keyed by
-    the per-file metadata signature; changes to any frozen file invalidate
-    the cached hash, so tampering is still
-    caught while an unchanged view costs no disk reads.
+    摘要走内容指纹缓存，缓存键是每个文件的元数据签名：任何字节改动都会让它失效并
+    重新逐字节读一遍，所以篡改照样能抓到，而没变过的视图一次磁盘读都不用。
     """
     if binding["profile"] != BUILTIN_PROFILE:
-        inst = (
-            installed.get(binding["install_id"])
-            if installed is not None
-            else registry.get(binding["install_id"])
-        )
+        inst = registry.get(binding["install_id"])
         if inst is None or inst.state == "removed" or not inst.enabled:
             raise PermissionDenied("capability is no longer authorized", runtime_name=name)
         owner = inst.payload.get("owner_user_id")
@@ -196,28 +129,8 @@ def _validate_skill_binding(
         owner = dependency.payload.get("owner_user_id")
         if owner and str(owner) != run.user_id:
             raise PermissionDenied("skill dependency belongs to another user", runtime_name=name)
-    if comp is None or skills.skill_dir_hash(comp.path, fresh=fresh) != binding["content_hash"]:
+    if comp is None or skills.skill_dir_hash(comp.path) != binding["content_hash"]:
         raise IntegrityFailed("prepared revision is missing or changed", runtime_name=name)
-
-
-def _check_skill_bindings(run, *, fresh, installed):
-    def check(item):
-        name, binding = item
-        _validate_skill_binding(name, binding, run, fresh=fresh, installed=installed)
-
-    # Windows metadata I/O dominates large closures. Each worker only reads its
-    # own package and the detached registry snapshot; no DB session is shared.
-    # Consume every result before exposing the view; any failure still rejects it.
-    if os.name == "nt" and len(run.bindings) >= 8:
-        with ThreadPoolExecutor(max_workers=4, thread_name_prefix="cap-verify") as pool:
-            futures = [
-                pool.submit(copy_context().run, check, item) for item in run.bindings.items()
-            ]
-            for future in futures:
-                future.result()
-    else:
-        for item in run.bindings.items():
-            check(item)
 
 
 def validate(
@@ -226,18 +139,12 @@ def validate(
     user_id: Optional[str] = None,
     execution_plane: str = "local",
     only_skill: Optional[str] = None,
-    fresh: bool = True,
 ) -> None:
     """Verify a prepared run is still authorized and its frozen bytes intact.
 
-    With ``only_skill`` set, only that single skill binding is re-checked
-    (authorization + fresh content hash) plus the cheap account guards. The
-    per-assembly skill enumeration passes it so each of N skill loaders verifies
-    just its own skill: O(N) work instead of the O(N²) full-run re-hash that
-    dominated desktop agent setup (every loader re-hashing every skill, twice
-    per assembly). The connector and cross-dependency loops, and the whole-run
-    integrity sweep, still run at view-build time (``rebuild``) and whenever the
-    default full ``validate`` is called (recovery probes, direct checks).
+    带 ``only_skill`` 时只复查那一个技能绑定加上廉价的账号守卫。技能枚举按这个
+    参数逐个复查自己那一份：N 次工作量，而不是每个加载器都把全量技能重算一遍的
+    N² ——后者曾是桌面端装配最大的一块开销。整轮的视图校验在 ``rebuild`` 里做。
     """
     if user_id is not None and run.user_id != str(user_id):
         raise PermissionDenied("prepared run belongs to another user")
@@ -270,147 +177,116 @@ def validate(
             )
         ):
             ensure_current_authorization()
-    if only_skill is not None:
-        if run.allow_unavailable:
-            latest = get(run.run_id, scope_id=run.scope_id) or run
-            if only_skill in latest.unavailable or latest.view_revision != run.view_revision:
-                raise PackageMissing("skill is unavailable in this view", runtime_name=only_skill)
-        binding = run.bindings.get(only_skill)
-        if binding is None:
-            raise PermissionDenied("capability is no longer authorized", runtime_name=only_skill)
-        _validate_skill_binding(only_skill, binding, run, fresh=False)
+    # 不带 ``only_skill`` 时到此为止：组件级授权由读取方与执行视图各自把关，
+    # 被撤销的单个组件只摘掉自己，不牵连这一轮里无关的工具或纯文本。
+    if only_skill is None:
         return
-    if run.allow_unavailable:
-        # Individual readers and execution views enforce component grants.
-        # A revoked component cannot prevent unrelated tools or plain text.
+    latest = get(run.run_id, scope_id=run.scope_id) or run
+    if only_skill in latest.unavailable:
+        raise PackageMissing("skill is unavailable in this view", runtime_name=only_skill)
+    binding = run.bindings.get(only_skill)
+    if binding is None:
+        raise PermissionDenied("capability is no longer authorized", runtime_name=only_skill)
+    _validate_skill_binding(only_skill, binding, run)
+
+
+def validate_activation(run: PreparedRun, nodes, *, available_mcp=()) -> None:
+    """激活一个此前被推迟的插件之前，复查它自己。
+
+    延迟加载把插件的定义留到模型真正要用时才展开，这中间用户可能已经把它停用、
+    卸载，或者定义文件被改过；它声明的版本 / 平台约束也要拿这一轮**冻结的那个**
+    技能版本去对，而不是拿当前安装的版本。``nodes`` 是推迟那一刻记下的身份。
+    只查这一个插件及其定义闭包，不牵连整轮。
+    """
+    from .dependency import Context, Inspector, _identifier, component_hash, require_report
+
+    nodes = list(nodes or [])
+    if not nodes:
         return
-    checked = {
-        sid: binding["install_id"].split(":", 2)[1:]
-        for sid, binding in run.mcp_bindings.items()
-        if binding.get("authorization_checked")
-    }
-    cloud_ids = [
-        sid for sid, (profile, _) in checked.items() if profile not in (LOCAL_PROFILE, "local-json")
-    ]
-    cloud_current = {}
-    if cloud_ids:
-        from core.services.desktop_cloud_bridge import cloud_gateway_mcp_configs
-
-        cloud_current = cloud_gateway_mcp_configs(cloud_ids)
-    local_current = None
-    for server_id, (profile, key) in checked.items():
-        binding = run.mcp_bindings[server_id]
-        if profile == "local-json":
-            from .mcp_json import local_server_configs
-
-            current = local_server_configs().get(key)
-        elif profile == LOCAL_PROFILE:
-            if local_current is None:
-                from core.services.mcp_service import McpServerConfigService
-
-                service = McpServerConfigService.get_instance()
-                local_current = {
-                    **service.get_all_servers(enabled_only=True),
-                    **service.get_owned_servers(run.user_id, enabled_only=True),
-                }
-            current = local_current.get(key)
-        else:
-            current = cloud_current.get(server_id)
-        if not current or _config_digest(current) != binding["config_digest"]:
-            raise PermissionDenied(
-                "prepared connector is disabled or its connection instructions changed",
-                runtime_name=server_id,
+    for node in nodes:
+        kind, profile, key = node["install_id"].split(":", 2)
+        if profile != BUILTIN_PROFILE:
+            inst = registry.get(node["install_id"])
+            if inst is None or inst.state == "removed" or not inst.enabled:
+                raise PermissionDenied("capability is no longer authorized", runtime_name=key)
+            owner = inst.payload.get("owner_user_id")
+            if owner and str(owner) != run.user_id:
+                raise PermissionDenied("capability belongs to another user", runtime_name=key)
+        comp = store.get(kind, profile, key, node["revision"])
+        if comp is None or component_hash(comp) != node["content_hash"]:
+            raise IntegrityFailed(
+                "prepared dependency revision is missing or changed", runtime_name=key
             )
-    # One query for the whole closure: a full device re-checks 200+ rows here on
-    # every message, and a lookup per row was half a second of round trips.
-    installed = registry.get_many(
+
+    # 这一轮没选中的组件跳过；选中的那些，约束必须在冻结版本上依然成立。
+    selected_mcp = set(available_mcp or ())
+
+    def is_selected(entry, _required):
+        key = _identifier(entry).split(":")[-1]
+        if entry.get("kind") == "skill":
+            return key in run.bindings
+        if entry.get("kind") == "mcp":
+            return key in selected_mcp
+        return True
+
+    inspector = Inspector(
+        Context(
+            user_id=run.user_id,
+            bindings=run.bindings,
+            available_mcp=selected_mcp,
+            frozen_nodes={node["install_id"]: node for node in nodes},
+            collect_hashes=False,
+        ),
+        on_visit=is_selected,
+    )
+    inspector.visit_roots(
         [
-            *(
-                node["install_id"]
-                for node in run.dependency_report.get("nodes", [])
-                if node["kind"] != "skill"
-            ),
-            *(
-                binding["install_id"]
-                for binding in run.bindings.values()
-                if binding["profile"] != BUILTIN_PROFILE
-            ),
+            ({"kind": node["kind"], "id": node["install_id"]}, node["install_id"].split(":", 2)[1])
+            for node in nodes
         ]
     )
-
-    def check_dependency(node):
-        from .dependency import component_hash
-
-        kind, profile, key = node["install_id"].split(":", 2)
-        inst = installed.get(node["install_id"])
-        if not inst or not inst.enabled or inst.state == "removed":
-            raise PermissionDenied("prepared dependency is no longer authorized")
-        owner = inst.payload.get("owner_user_id")
-        if owner and str(owner) != run.user_id:
-            raise PermissionDenied("prepared dependency belongs to another user")
-        comp = store.get(kind, profile, key, node["revision"])
-        if comp is None or component_hash(comp, fresh=fresh) != node["content_hash"]:
-            raise IntegrityFailed("prepared dependency revision is missing or changed")
-
-    nodes = [node for node in run.dependency_report.get("nodes", []) if node["kind"] != "skill"]
-    if os.name == "nt" and len(nodes) >= 8:
-        with ThreadPoolExecutor(max_workers=4, thread_name_prefix="cap-dependency-verify") as pool:
-            futures = [pool.submit(copy_context().run, check_dependency, node) for node in nodes]
-            for future in futures:
-                future.result()
-    else:
-        for node in nodes:
-            check_dependency(node)
-    _check_skill_bindings(run, fresh=fresh, installed=installed)
+    require_report(inspector.report())
 
 
 def rebuild(run: PreparedRun) -> Path:
-    if run.allow_unavailable:
-        from .availability import rebuild_available_view
+    """把执行视图链到冻结的版本目录上。
 
-        return rebuild_available_view(run)
+    视图是派生物，随时可以从绑定重建；这里只创建和删除链接，绝不复制字节。
+    某个组件通不过校验就把它从视图里摘掉并记进 ``unavailable``，其余照常可用。
+    """
+    run = get(run.run_id, scope_id=run.scope_id) or run
     fingerprint = _view_fingerprint(run)
-    assembly = _assembly_for(run)
-    if assembly is None:
-        validate(run)
-
-    def target_for(item):
-        name, binding = item
-        component = _component(binding)
-        if component is None:
-            raise IntegrityFailed("prepared revision is missing or changed", runtime_name=name)
-        return name, component.path
-
-    if os.name == "nt" and len(run.bindings) >= 8:
-        with ThreadPoolExecutor(max_workers=4, thread_name_prefix="cap-view-targets") as pool:
-            futures = [
-                pool.submit(copy_context().run, target_for, item) for item in run.bindings.items()
-            ]
-            targets = dict(future.result() for future in futures)
-    else:
-        targets = dict(target_for(item) for item in run.bindings.items())
+    unavailable = dict(run.unavailable)
+    targets: Dict[str, Path] = {}
+    for name, binding in run.bindings.items():
+        if name in unavailable:
+            continue
+        try:
+            _validate_skill_binding(name, binding, run)
+            component = _component(binding)
+            if component is None:
+                raise IntegrityFailed("prepared revision is missing or changed", runtime_name=name)
+            targets[name] = component.path
+        except (CapabilityError, OSError, ValueError) as exc:
+            unavailable[name] = getattr(exc, "code", "view_unavailable")
     report = view.build_view(run.view_dir, targets, allowed_roots=[require_root()])
-    if report.blocked:
-        raise ViewUnavailable("prepared view is blocked", details={"blocked": report.blocked})
-    if assembly is None:
-        with _view_build_lock:
-            _view_built[(run.run_id, run.scope_id)] = fingerprint
-    else:
-        assembly.pending_view = fingerprint
+    if report.blocked or report.foreign:
+        # 名字被真实目录占用或大小写撞名：沙箱绝不能收到一个来路不明的目录。
+        raise ViewUnavailable(
+            "prepared view is blocked",
+            details={"blocked": report.blocked, "foreign": report.foreign},
+        )
+    if unavailable != run.unavailable:
+        run = save(replace(run, unavailable=unavailable))
+    with _view_build_lock:
+        _view_built[(run.run_id, run.scope_id)] = fingerprint
     return run.view_dir
 
 
-def _freeze_candidate(name, candidate, *, installed=None, deferred=False):
-    # An installed immutable identity can be pinned before reading its bytes.
-    # The factory's final fresh sweep must prove it before any loader sees it.
-    actual = (
-        candidate.content_hash
-        if deferred
-        and candidate.profile != BUILTIN_PROFILE
-        and candidate.content_hash
-        and candidate.revision
-        else skills.skill_dir_hash(candidate.path, fresh=True)
-    )
+def _freeze_candidate(name, candidate):
+    # 摘要走内容指纹缓存：候选路径是不可变存储里的版本目录，字节一改元数据签名
+    # 就变、缓存随之失效，所以复用安全，而重复冻结同一版本不必再读一遍磁盘。
+    actual = skills.skill_dir_hash(candidate.path)
     revision = candidate.revision or revision_for_hash(actual)
     profile = candidate.profile
     if profile == BUILTIN_PROFILE:
@@ -425,11 +301,7 @@ def _freeze_candidate(name, candidate, *, installed=None, deferred=False):
         raise IntegrityFailed("installed content changed", runtime_name=name)
     installation = None
     if profile != BUILTIN_PROFILE:
-        installation = (
-            registry.get(candidate.install_id)
-            if installed is None
-            else installed.get(candidate.install_id)
-        )
+        installation = registry.get(candidate.install_id)
     return {
         "install_id": candidate.install_id,
         "profile": profile,
@@ -460,49 +332,6 @@ def _definition_data(definition):
     }
 
 
-def _selected_skill_closure(
-    resolution, local_bindings, selected, user_id, profile, agent_definition, plugin_ids
-):
-    """Discover selected files before freezing; actual grants are checked in preflight.
-
-    This visits only declarations reached from this run. Unrelated cached cloud
-    files must never turn a local run into a cloud-dependent run.
-    """
-    from .dependency import Context, Inspector
-
-    lookup = {
-        name: {"install_id": candidate.install_id, "revision": candidate.revision}
-        for name, candidate in resolution.chosen.items()
-    }
-    lookup.update(local_bindings)
-    inspector = Inspector(
-        Context(
-            user_id=str(user_id),
-            bindings=lookup,
-            installations={
-                row.install_id: row for row in registry.list_installations(include_removed=True)
-            },
-            collect_hashes=False,  # Discovery returns identities only; final validation owns hashes.
-        )
-    )
-    inspector.visit_roots(
-        [({"kind": "skill", "id": name}, profile or LOCAL_PROFILE) for name in selected]
-    )
-    for key in plugin_ids:
-        inspector.visit({"kind": "plugin", "id": key}, profile or LOCAL_PROFILE)
-    if agent_definition is not None:
-        inspector.definition(
-            _definition_data(agent_definition),
-            kind="agent",
-            profile=getattr(agent_definition, "profile", LOCAL_PROFILE),
-            label="agent:" + agent_definition.agent_id,
-        )
-    visited = set(inspector.nodes)
-    return set(selected) | {
-        name for name, candidate in resolution.chosen.items() if candidate.install_id in visited
-    }
-
-
 def _bind_cloud_identity(run):
     from core.services.desktop_cloud_bridge import (
         _state_fingerprint,
@@ -524,6 +353,18 @@ def _bind_cloud_identity(run):
     return replace(run, profile=profile, authorization_fingerprint=fingerprint)
 
 
+def save(run: PreparedRun) -> PreparedRun:
+    """Persist the run snapshot; the business DB row is its durable record."""
+    with registry._session() as db:
+        key = _PREFIX + _snapshot_key(run.run_id, run.scope_id)
+        row = db.get(ContentBlock, key)
+        if row is None:
+            db.add(ContentBlock(id=key, payload=run.to_dict()))
+        else:
+            row.payload = run.to_dict()
+    return run
+
+
 def prepare(
     run_id: str,
     user_id: str,
@@ -533,124 +374,107 @@ def prepare(
     agent_definition=None,
     plugin_ids=(),
     scope_id: str = "",
-    allow_unavailable: bool = False,
 ) -> PreparedRun:
-    if allow_unavailable:
-        from .availability import prepare_available
+    """冻结这一轮可用的能力闭包。
 
-        return prepare_available(
-            run_id,
-            user_id,
-            skill_ids=skill_ids,
-            execution_plane=execution_plane,
-            agent_definition=agent_definition,
-            plugin_ids=plugin_ids,
-            scope_id=scope_id,
-        )
+    冻结不是复制：每个组件都钉在不可变存储里的一个版本上，版本按内容指纹划分且
+    永不原地修改，所以编辑安装目录只会产生新版本，已冻结的这一轮看到的字节自始
+    至终不变。准备不了的单个组件记进 ``unavailable``，不影响其余组件。
+    """
+    from .preparation import ensure_cloud_ready
+
     if not run_id:
         raise ValueError("a run id is required for a durable capability snapshot")
-    with _lock:
-        previous = get(run_id, scope_id=scope_id)
-        if previous is not None:
-            assembly = _assembly_pass.get()
-            if assembly is not None:
-                assembly.enabled = False  # Recovery retains the standalone checks.
-            validate(previous, user_id=user_id, execution_plane=execution_plane, fresh=False)
-            missing = set(skill_ids or []) - set(previous.bindings)
-            if missing:
-                raise PackageMissing(
-                    "requested skills are absent from the frozen run",
-                    details={"skills": sorted(missing)},
-                )
-            _ensure_view(previous)
-            return previous
-        if execution_plane != "local":
-            raise PackageMissing(
-                "device capabilities require local execution",
-                details={"recovery_action": "switch_execution_plane"},
-            )
-        initial_profile = skills.current_account_profile()
-        from .preparation import ensure_cloud_ready
-
-        # 选中的插件、被委派的智能体绑定的云端技能/插件及其组件按需下载，再解析。
-        _agent_skill_keys = list(getattr(agent_definition, "skill_ids", None) or [])
-        _agent_plugin_keys = list(getattr(agent_definition, "plugin_ids", None) or [])
-        ensure_cloud_ready(
-            user_id,
-            skill_keys=[*(skill_ids or []), *_agent_skill_keys],
-            plugin_keys=[*(plugin_ids or []), *_agent_plugin_keys],
-        )
-        res = skills.resolve_for_user(str(user_id))
-        conflicts = set(skill_ids or []) & set(res.conflicts)
-        if conflicts:
-            raise NameConflict(
-                "choose a source for the conflicting skills", details={"skills": sorted(conflicts)}
-            )
-        missing = set(skill_ids or []) - set(res.chosen)
-        if missing:
-            ensure_cloud_ready(user_id, skill_keys=sorted(missing))
-            res = skills.resolve_for_user(str(user_id))
-            missing = set(skill_ids or []) - set(res.chosen)
+    previous = get(run_id, scope_id=scope_id)
+    if previous is not None:
+        validate(previous, user_id=user_id, execution_plane=execution_plane)
+        # 重放这一轮只能用它当初冻下来的那些；子智能体想要更多，得开新的一轮，
+        # 不能借同一个 run 键把闭包悄悄撑大。
+        missing = set(skill_ids or []) - set(previous.bindings) - set(previous.unavailable)
         if missing:
             raise PackageMissing(
-                "selected skills are not ready", details={"skills": sorted(missing)}
+                "requested skills are absent from the frozen run",
+                details={"skills": sorted(missing)},
             )
-        # Local/builtin progressive reads stay available offline. Cloud content
-        # is frozen only when selected directly or by an agent/plugin dependency.
-        local_candidates = {
-            name: candidate
-            for name, candidate in res.chosen.items()
-            if candidate.profile in (LOCAL_PROFILE, BUILTIN_PROFILE)
-        }
-        installed = registry.get_many(
-            candidate.install_id
-            for candidate in local_candidates.values()
-            if candidate.profile != BUILTIN_PROFILE
-        )
-        assembly = _assembly_pass.get()
-        deferred = bool(assembly and assembly.enabled)
-        if deferred and assembly.identity != (str(run_id), str(user_id), str(scope_id or "")):
-            raise IntegrityFailed("capability assembly belongs to another run")
+        rebuild(previous)
+        return get(run_id, scope_id=scope_id) or previous
+    if execution_plane != "local":
+        raise PackageMissing("device capabilities require local execution")
+    requested = list(
+        dict.fromkeys([*(skill_ids or []), *(getattr(agent_definition, "skill_ids", None) or [])])
+    )
+    # 这一轮的根：选中的技能，加上选中的插件。先各自按需下载，再从它们出发
+    # 走一遍依赖，把闭包里牵连到的技能也收进来。一个根准备不了只记下它自己。
+    account = skills.current_account_profile() or LOCAL_PROFILE
+    roots = [("skill", name, LOCAL_PROFILE, name) for name in requested]
+    roots += [("plugin", key, account, "plugin:" + key) for key in plugin_ids]
+    unavailable = {}
+    for kind, key, _profile, label in roots:
+        keys = {"skill_keys": [key]} if kind == "skill" else {"plugin_keys": [key]}
+        try:
+            ensure_cloud_ready(user_id, **keys)
+        except (CapabilityError, OSError, ValueError) as exc:
+            unavailable[label] = getattr(exc, "code", "package_missing")
+    resolution = skills.resolve_for_user(str(user_id))
+    from .dependency import Context
+    from .readiness import _BindingInspector, _choice_bindings
 
-        def freeze(item):
-            name, candidate = item
-            return name, _freeze_candidate(name, candidate, installed=installed, deferred=deferred)
-
-        if os.name == "nt" and len(local_candidates) >= 8:
-            with ThreadPoolExecutor(max_workers=4, thread_name_prefix="cap-freeze") as pool:
-                pending = [
-                    pool.submit(copy_context().run, freeze, item)
-                    for item in local_candidates.items()
-                ]
-                bindings = dict(future.result() for future in pending)
-        else:
-            bindings = dict(freeze(item) for item in local_candidates.items())
-        selected = _selected_skill_closure(
-            res, bindings, skill_ids or [], user_id, initial_profile, agent_definition, plugin_ids
+    discovery = _BindingInspector(
+        Context(
+            user_id=str(user_id), collect_hashes=False, bindings=_choice_bindings(resolution.chosen)
         )
-        for name in selected:
-            candidate = res.chosen.get(name)
-            if candidate is not None and name not in bindings:
-                bindings[name] = _freeze_candidate(name, candidate, deferred=deferred)
-        run = PreparedRun(
-            str(run_id), str(user_id), None, execution_plane, bindings, scope_id=str(scope_id or "")
+    )
+    for kind, key, profile, _label in roots:
+        try:
+            discovery.visit({"kind": kind, "id": key}, profile)
+        except (CapabilityError, OSError, ValueError):
+            continue
+    if agent_definition is not None:
+        discovery.definition(
+            _definition_data(agent_definition),
+            kind="agent",
+            profile=getattr(agent_definition, "profile", LOCAL_PROFILE),
+            label="agent:" + str(agent_definition.agent_id),
         )
-        if (
-            any(
-                binding["profile"] not in (LOCAL_PROFILE, BUILTIN_PROFILE)
-                for binding in bindings.values()
+    requested = list(
+        dict.fromkeys(
+            [
+                *requested,
+                *(
+                    node["install_id"].split(":", 2)[2]
+                    for node in discovery.nodes.values()
+                    if node["kind"] == "skill"
+                ),
+            ]
+        )
+    )
+    bindings = {}
+    for name in requested:
+        candidate = resolution.chosen.get(name)
+        if candidate is None:
+            unavailable[name] = (
+                "name_conflict" if name in resolution.conflicts else "package_missing"
             )
-            or getattr(agent_definition, "origin", "local") == "cloud"
-        ):
-            run = _bind_cloud_identity(run)
-        if deferred:
-            assembly.bindings = copy.deepcopy(run.bindings)
-        rebuild(run)
-        with registry._session() as db:
-            db.add(
-                ContentBlock(id=_PREFIX + _snapshot_key(run_id, scope_id), payload=run.to_dict())
-            )
-        return run
+            continue
+        try:
+            bindings[name] = _freeze_candidate(name, candidate)
+            unavailable.pop(name, None)
+        except (CapabilityError, OSError, ValueError) as exc:
+            unavailable[name] = getattr(exc, "code", "package_missing")
+    run = PreparedRun(
+        str(run_id),
+        str(user_id),
+        None,
+        execution_plane,
+        bindings,
+        scope_id=str(scope_id or ""),
+        unavailable=unavailable,
+    )
+    if any(b["profile"] not in (LOCAL_PROFILE, BUILTIN_PROFILE) for b in bindings.values()):
+        run = _bind_cloud_identity(run)
+    save(run)
+    rebuild(run)
+    return get(run_id, scope_id=scope_id) or run
 
 
 _view_build_lock = threading.Lock()
@@ -665,7 +489,6 @@ _view_built: dict[tuple[str, str], tuple] = {}
 def _view_fingerprint(run: PreparedRun) -> tuple:
     return (
         skills.view_generation(),
-        run.view_revision,
         tuple(sorted((name, b.get("revision")) for name, b in run.bindings.items())),
     )
 
@@ -681,14 +504,12 @@ def _ensure_view(run: PreparedRun) -> None:
 
 
 def frozen_loader(run: PreparedRun):
-    if _assembly_for(run) is not None:
-        raise ViewUnavailable("capability assembly has not completed verification")
     from core.agent_skills.backends import CompositeBackend, FilesystemBackend
     from core.agent_skills.loader import MultiSourceSkillLoader
 
     _ensure_view(run)
-    if run.allow_unavailable:
-        run = get(run.run_id, scope_id=run.scope_id) or run
+    # 视图重建可能刚摘掉某个组件，读取方必须拿到落库后的最新 ``unavailable``。
+    run = get(run.run_id, scope_id=run.scope_id) or run
     loader = MultiSourceSkillLoader(CompositeBackend([FilesystemBackend(run.view_dir, "prepared")]))
     loader.capability_run = run
     return loader
@@ -750,9 +571,7 @@ def bind_mcp(run: PreparedRun, configs, choices):
     }
     with _lock:
         saved = get(run.run_id, scope_id=run.scope_id)
-        assembly = _assembly_for(saved or run)
-        if assembly is None:
-            validate(saved or run)
+        validate(saved or run)
         pinned = (saved or run).mcp_bindings
         if not (saved or run).mcp_frozen:
             pinned = current
@@ -776,21 +595,12 @@ def bind_mcp(run: PreparedRun, configs, choices):
                     or old["install_id"] != entry["install_id"]
                     or old["config_digest"] != entry["config_digest"]
                 ):
-                    if (saved or run).allow_unavailable:
-                        # Keep the old source contract; never reconnect a changed
-                        # endpoint as though it were the original tool.
-                        unavailable["mcp:" + sid] = "connector_changed"
-                        configs = {key: value for key, value in configs.items() if key != sid}
-                        continue
-                    raise IntegrityFailed(
-                        "connector binding changed; prepare a new run", runtime_name=sid
-                    )
+                    # Keep the old source contract; never reconnect a changed
+                    # endpoint as though it were the original tool.
+                    unavailable["mcp:" + sid] = "connector_changed"
+                    configs = {key: value for key, value in configs.items() if key != sid}
             if unavailable != (saved or run).unavailable:
-                from .availability import save
-
                 save(replace(saved or run, unavailable=unavailable))
-        if assembly is not None:
-            assembly.mcps = copy.deepcopy(pinned)
         # Pinned schemas are persisted and never edited afterwards; sharing them
         # with the assembled config is safe and avoids re-copying every tool schema.
         return {
@@ -972,264 +782,103 @@ def _persist_preflight_report(run, report, *, offered=()):
         return updated
 
 
-def _merge_progressive_recheck(report, plugin_nodes, context, skill_ids, available_mcp):
-    """Recheck progressive plugin declarations against the frozen skill bindings.
-
-    Only components this run did not select are skipped; version, platform and
-    runtime constraints on the selected ones must survive the intersection, and
-    a definition that moved between preparation and now is an integrity failure.
-    """
-    from .dependency import Inspector, _identifier
-
-    selected_skills, selected_mcp = set(skill_ids or ()), set(available_mcp or ())
-    expected_nodes = {node["install_id"]: node for node in plugin_nodes}
-    progressive_context = replace(context, frozen_nodes={**context.frozen_nodes, **expected_nodes})
-
-    def is_selected(entry, _required):
-        key = _identifier(entry).split(":")[-1]
-        if entry.get("kind") == "skill":
-            return key in selected_skills
-        if entry.get("kind") == "mcp":
-            return key in selected_mcp
-        return True
-
-    progressive = Inspector(progressive_context, on_visit=is_selected)
-    progressive.visit_roots(
-        [
-            ({"kind": node["kind"], "id": node["install_id"]}, node["install_id"].split(":", 2)[1])
-            for node in plugin_nodes
-        ]
-    )
-    checked = progressive.report()
-
-    for node in checked["nodes"]:
-        expected = expected_nodes.get(node["install_id"])
-        if expected and any(
-            node.get(field) != expected.get(field) for field in ("revision", "content_hash")
-        ):
-            raise IntegrityFailed("plugin definition changed during preparation")
-    known = {node["install_id"] for node in report["nodes"]}
-    report["nodes"].extend(node for node in checked["nodes"] if node["install_id"] not in known)
-    report["errors"].extend(checked["errors"])
-    report["warnings"].extend(checked["warnings"])
-    report["ready"] = report["ready"] and checked["ready"]
-
-
-_catalog_lock = threading.Lock()
-# (signal) -> {skill runtime name: (errors, nodes, warnings)}. The verdict for a
-# menu item is a pure function of the signal below, and a conversation asks the
-# same question again on every message.
-_catalog_probes: Dict[tuple, Dict[str, tuple]] = {}
-
-
-def _catalog_signal(run, context) -> tuple:
-    return (
-        run.user_id,
-        registry.generation(),
-        skills.view_generation(),
-        frozenset(context.available_mcp or ()),
-        frozenset(context.available_kb or ()),
-        frozenset(context.available_models) if context.available_models is not None else None,
-        tuple(
-            sorted(
-                (node["install_id"], node.get("revision"), node.get("content_hash"))
-                for node in run.dependency_report.get("nodes", [])
-            )
-        ),
-    )
-
-
 def preflight(
     run,
     *,
-    skill_ids=(),
-    catalog_skill_ids=(),
-    agent_definition=None,
-    plugin_ids=(),
     available_mcp=(),
     available_kb=(),
     available_models=None,
-    plugin_nodes=(),
+    plugin_ids=(),
 ):
-    """Stop before connecting/executing tools if the authorized closure is incomplete.
+    """走一遍依赖闭包，把这一轮真正能跑的能力定下来。
 
-    ``skill_ids``, ``plugin_ids`` and the agent definition are what this turn
-    *committed* to — the user selected them, the model already invoked them, or
-    the bound sub-agent declares them. An unmet dependency there stops the turn.
-
-    ``catalog_skill_ids`` is the ambient menu the model may pick from. A menu
-    item whose own dependencies are unmet on this device is taken off the menu
-    for this turn and reported under ``unavailable_skills``; it never stops the
-    turn. One catalog skill missing a connector must not make the whole
-    assistant unusable.
+    某个技能的依赖在本机不成立，就只把这个技能摘掉并记进 ``unavailable_skills``，
+    绝不因此让整个助手不可用。连接器与插件的从属关系记进 ``connector_parents``，
+    供「加载插件」一类的工具反查。
     """
-    from .dependency import Context, Inspector, allowed_model_ids, require_report
+    from .dependency import Context, Inspector
 
-    if run.allow_unavailable:
-        from .availability import preflight_available
-
-        return preflight_available(
-            run,
-            available_mcp=available_mcp,
-            available_kb=available_kb,
-            available_models=available_models,
-            plugin_ids=plugin_ids,
-            agent_definition=agent_definition,
-        )
-
+    validate(run)
     run = get(run.run_id, scope_id=run.scope_id) or run
-    from .errors import CapabilityError
-
-    assembly = _assembly_for(run)
-    try:
-        if assembly is None:
-            validate(run, fresh=False)
-    except CapabilityError as exc:
-        report = copy.deepcopy(run.dependency_report)
-        report.update(
-            ready=False,
-            errors=[
-                {"code": exc.code, "dependency_chain": [], "recovery_action": exc.recovery_action}
-            ],
-            warnings=[],
-        )
-        _persist_preflight_report(run, report)
-        raise
-    if available_models is None:
-        try:
-            available_models = allowed_model_ids(run.user_id)
-        except Exception:
-            available_models = None
+    if run.dependency_report.get("ready"):
+        # 这个作用域已经定过一次，就保持那份冻结报告，只把视图对齐。
+        rebuild(run)
+        return get(run.run_id, scope_id=run.scope_id) or run
+    unavailable = dict(run.unavailable)
     context = Context(
         user_id=run.user_id,
         bindings=run.bindings,
         available_mcp=set(available_mcp),
         available_kb=set(available_kb),
         available_models=available_models,
-        frozen_nodes={node["install_id"]: node for node in run.dependency_report.get("nodes", [])},
-        # The assembly's final fresh gate verifies these identities once. The
-        # graph walk reads definitions/constraints but need not rehash them.
-        pinned_hashes=(
-            {
-                **{
-                    binding["install_id"]: (binding["revision"], binding["content_hash"])
-                    for binding in run.bindings.values()
-                },
-                **{
-                    node["install_id"]: (node["revision"], node["content_hash"])
-                    for node in plugin_nodes or []
-                },
-            }
-            if assembly is not None
-            else None
-        ),
-        installations={
-            row.install_id: row for row in registry.list_installations(include_removed=True)
-        },
+        collect_hashes=False,
     )
-    inspector = Inspector(context)
-    committed = list(dict.fromkeys(skill_ids or []))
-    for name in committed:
-        inspector.visit({"kind": "skill", "id": name}, LOCAL_PROFILE)
-    for name in plugin_ids or []:
-        inspector.visit(
-            {"kind": "plugin", "id": name},
-            run.profile or skills.current_account_profile() or LOCAL_PROFILE,
-        )
-    if agent_definition is not None:
-        definition = _definition_data(agent_definition)
-        agent_profile = getattr(agent_definition, "profile", LOCAL_PROFILE)
-        inspector.definition(
-            definition,
-            kind="agent",
-            profile=agent_profile,
-            label="agent:" + agent_definition.agent_id,
-        )
-        # Preserve a concrete definition revision when the selected agent has a
-        # store projection, in addition to its already-frozen inline instructions.
-        agent_iid = registry.install_id("agent", agent_profile, agent_definition.agent_id)
-        inst = registry.get(agent_iid)
-        if inst:
-            inspector.visit({"kind": "agent", "id": inst.key}, inst.profile_id)
-    committed_nodes = set(inspector.nodes)
-    # Each menu item is inspected in its own walker so an unmet dependency is
-    # attributable to exactly one skill; only the ones that can actually run
-    # here are offered to the model and contribute their identity to the run.
-    unavailable = []
-    usable_skill_ids = list(committed)
-    committed_set = set(committed)
-    signal = _catalog_signal(run, context)
-    with _catalog_lock:
-        remembered = dict(_catalog_probes.get(signal) or {})
-    missing_catalog = [
-        name
-        for name in dict.fromkeys(catalog_skill_ids or [])
-        if name not in committed_set and name not in remembered
-    ]
+    nodes = {}
+    connector_parents = {}
 
-    def inspect_catalog(name):
-        probe = Inspector(context)
-        probe.visit({"kind": "skill", "id": name}, LOCAL_PROFILE)
-        return name, (probe.errors, probe.nodes, probe.warnings)
+    class _ParentTrackingInspector(Inspector):
+        def external(self, entry, chain, required):
+            if entry.get("kind") == "mcp":
+                connector_parents.setdefault(chain[-1][4:], []).extend(
+                    parent for parent in chain[:-1] if parent.startswith("plugin:")
+                )
+            return super().external(entry, chain, required)
 
-    if os.name == "nt" and len(missing_catalog) >= 8:
-        with ThreadPoolExecutor(max_workers=4, thread_name_prefix="cap-catalog") as pool:
-            futures = [
-                pool.submit(copy_context().run, inspect_catalog, name) for name in missing_catalog
+    for name, binding in run.bindings.items():
+        if name in unavailable:
+            continue
+        inspector = _ParentTrackingInspector(context)
+        try:
+            inspector.visit({"kind": "skill", "id": name}, binding["profile"])
+            if inspector.errors:
+                unavailable[name] = "dependency_missing"
+            else:
+                nodes.update(inspector.nodes)
+                binding["dependency_install_ids"] = [
+                    node["install_id"]
+                    for node in inspector.nodes.values()
+                    if node["install_id"] != binding["install_id"]
+                ]
+        except (CapabilityError, OSError, ValueError, AttributeError):
+            unavailable[name] = "dependency_missing"
+    for plugin in plugin_ids:
+        inspector = _ParentTrackingInspector(context)
+        try:
+            inspector.visit({"kind": "plugin", "id": plugin}, run.profile or LOCAL_PROFILE)
+            if inspector.errors:
+                unavailable["plugin:" + plugin] = "dependency_missing"
+            else:
+                nodes.update(inspector.nodes)
+            parents = [
+                node["install_id"]
+                for node in inspector.nodes.values()
+                if node["kind"] in ("plugin", "agent")
             ]
-            for future in futures:
-                name, seen = future.result()
-                remembered[name] = seen
-    for name in dict.fromkeys(catalog_skill_ids or []):
-        if name in committed_set:
-            continue
-        seen = remembered.get(name)
-        if seen is None:
-            probe = Inspector(context)
-            probe.visit({"kind": "skill", "id": name}, LOCAL_PROFILE)
-            seen = (probe.errors, probe.nodes, probe.warnings)
-            remembered[name] = seen
-        errors, nodes, warnings = seen
-        if errors:
-            unavailable.append({"skill_id": name, "reasons": copy.deepcopy(errors)})
-            continue
-        inspector.nodes.update(copy.deepcopy(nodes))
-        inspector.warnings.extend(copy.deepcopy(warnings))
-        usable_skill_ids.append(name)
-    offered_nodes = set(inspector.nodes) - committed_nodes
-    report = inspector.report()
-    report["unavailable_skills"] = unavailable
-    for row in unavailable:
-        report["warnings"].extend(row["reasons"])
-    if plugin_nodes:
-        _merge_progressive_recheck(report, plugin_nodes, context, usable_skill_ids, available_mcp)
-    report["state"] = "ready" if report["ready"] else "blocked"
-    if not report["ready"]:
-        report["error"] = {"code": "dependency_missing", "recovery_action": "inspect_dependencies"}
-    updated = replace(run, dependency_report=report)
-    if report["ready"] and (
-        any(
-            node["install_id"].split(":", 2)[1] not in (LOCAL_PROFILE, BUILTIN_PROFILE)
-            for node in report.get("nodes", [])
-        )
-        or getattr(agent_definition, "origin", "local") == "cloud"
-    ):
-        updated = _bind_cloud_identity(updated)
-    _assembly_for(updated)
-    # Always fetch live grants and read every byte at this final factory gate.
-    validate(updated, fresh=assembly is not None)
-    updated = _persist_preflight_report(updated, report, offered=offered_nodes)
-    require_report(updated.dependency_report)
-    with _catalog_lock:
-        _catalog_probes.clear()
-        _catalog_probes[signal] = remembered
-    if assembly is not None:
-        _assembly_for(updated)
-        if assembly.pending_view == _view_fingerprint(updated):
-            with _view_build_lock:
-                _view_built[(updated.run_id, updated.scope_id)] = assembly.pending_view
-        assembly.enabled = False
-    return updated
+            for node in inspector.nodes.values():
+                name = node["install_id"].split(":", 2)[2]
+                if node["kind"] == "skill" and name in run.bindings:
+                    run.bindings[name].setdefault("dependency_install_ids", []).extend(parents)
+                    if inspector.errors:
+                        unavailable[name] = "dependency_missing"
+        except (CapabilityError, OSError, ValueError):
+            unavailable["plugin:" + plugin] = "dependency_missing"
+    report = {
+        "ready": True,
+        "state": "ready",
+        "nodes": list(nodes.values()),
+        "errors": [],
+        "warnings": [],
+        "connector_parents": connector_parents,
+        "unavailable_skills": [
+            {"skill_id": name, "reasons": [{"code": code}]} for name, code in unavailable.items()
+        ],
+    }
+    updated = replace(run, unavailable=unavailable, dependency_report=report)
+    save(updated)
+    # 这里必须真重建：它顺带是这一轮唯一一次逐个复核冻结字节的机会，
+    # 中途被改过的组件要在交给沙箱之前撤下来。不要图快改成按指纹跳过。
+    rebuild(updated)
+    return get(run.run_id, scope_id=run.scope_id) or updated
 
 
 _TOOL_SCOPE_PREFIX = "desktop_capability_tool_scope:"

@@ -28,10 +28,8 @@ from typing import Optional
 from agentscope.tool import Toolkit
 from core.services.project_scope import ProjectScope
 
-from . import myspace_vfs as _ms
 from ._common import (
     myspace_mutation_refusal,
-    pin_artifact_to_workspace,
     resolve_sandbox_session,
     resp_json,
 )
@@ -276,22 +274,8 @@ def register_edit(
         if physical != file_path:
             state.record(physical, new_entry)
 
-        # ── Reverse-sync to artifact (myspace paths only) ──────────────
-        artifact_ref: Optional[dict] = None
-        if is_myspace_physical(physical, user_id) and user_id:
-            artifact_ref = _ms.sync_upsert(
-                user_id=user_id,
-                chat_id=chat_id,
-                logical_path=file_path,
-                content=new_bytes,
-                scope=scope,
-            )
-            # Auto-pin: even for an in-place update with the same file_id, re-show
-            # the card in the current turn (workspace state is per-turn, so an
-            # Edit in a new turn always triggers a new card)
-            if artifact_ref:
-                pin_artifact_to_workspace(artifact_ref)
-
+        # 改在 /myspace 下的文件这里不做登记：内容已经落在用户自己的目录里，
+        # core.myspace.watcher 从文件事件登记它 —— 和那里发生的任何其它写入一样。
         diff = _make_unified_diff(file_path, current_text, new_text)
         payload: dict = {
             "ok": True,
@@ -304,20 +288,11 @@ def register_edit(
             "new_size": len(new_bytes),
             "persistent": is_myspace_physical(physical, user_id),
         }
-        if artifact_ref:
-            payload["artifact"] = artifact_ref
-            payload["artifacts"] = [artifact_ref]
-            payload["file_id"] = artifact_ref.get("file_id")
-            if artifact_ref.get("in_place_update"):
-                payload["note"] = (
-                    "已就地更新「我的空间」里的同名 artifact（file_id 不变，"
-                    "Canvas/下载链接立即指向新内容）。"
-                )
         return resp_json(payload)
 
     Edit.__doc__ = (
-        "对文本文件做精确字符串替换。改 ``/myspace/...`` 的文件会立即同步回我的\n"
-        "空间，同一 file_id、下载链接不变。\n\n"
+        "对文本文件做精确字符串替换。改 ``/myspace/...`` 的文件同一 file_id、\n"
+        "下载链接不变。\n\n"
         "前置条件（缺一不可）：\n"
         "- 必须先 ``Read(file_path)`` 完整读过该文件（不传 offset/limit）。\n"
         "- ``old_string`` 必须**精确**匹配文件内容（不含行号前缀；空白/缩进/\n"
@@ -333,8 +308,8 @@ def register_edit(
         "    replace_all (`bool`): 默认 false，仅替换唯一匹配；true 则替换全部。\n\n"
         "Returns:\n"
         "    JSON: ``{ok: true, file_path, physical_path, replaced, replace_all,\n"
-        "             diff, old_size, new_size, persistent, file_id?, artifact?,\n"
-        "             note?}`` 成功；``{error: '...'}`` 失败。\n"
+        "             diff, old_size, new_size, persistent}`` 成功；\n"
+        "    ``{error: '...'}`` 失败。\n"
     )
 
     toolkit.register_tool_function(Edit, namesake_strategy="override")

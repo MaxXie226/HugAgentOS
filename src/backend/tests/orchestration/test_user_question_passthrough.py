@@ -10,6 +10,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+from orchestration.memory_integration import SessionMemory
 
 
 @pytest.mark.asyncio
@@ -56,7 +57,7 @@ async def test_user_question_events_reach_the_stream(monkeypatch):
         )
 
     async def no_memory(*_args, **_kwargs):
-        return None
+        return SessionMemory(chat_id="", scope_user_id="", workspace_id="default", memory_enabled=False)
 
     async def no_identity(_user_id):
         return ""
@@ -78,7 +79,7 @@ async def test_user_question_events_reach_the_stream(monkeypatch):
     monkeypatch.setattr(builtin_subagents, "merge_builtin_subagents", lambda *_a, **_kw: [])
     monkeypatch.setattr(compaction_service, "maybe_run_pre_turn_compaction", no_compaction)
     monkeypatch.setattr(workflow, "create_agent_executor", create_agent)
-    monkeypatch.setattr(workflow, "launch_memory_retrieval", no_memory)
+    monkeypatch.setattr(workflow, "open_session_memory", no_memory)
     monkeypatch.setattr(workflow, "build_user_identity_block", no_identity)
     monkeypatch.setattr(workflow, "anchor_start_for_chat", lambda _chat_id: 0)
     monkeypatch.setattr(workflow, "enabled_skill_ids_from_context", lambda _ctx: [])

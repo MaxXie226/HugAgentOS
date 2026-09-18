@@ -487,6 +487,29 @@ def _managed_enabled(st: Dict[str, Any]) -> Dict[str, bool]:
         return {}
 
 
+def set_managed_connector_enabled(server_id: str, enabled: bool) -> bool:
+    """记下用户对某个云端下发连接器的启停，落本机 mcp.json。
+
+    本机是这个开关的唯一记账处：装配走 ``_bridge_context()``，它就按这里的标志
+    过滤，云端不参与也不需要回写。返回 False 表示该 server_id 不是本机托管的
+    云端连接器，调用方应继续按普通目录项处理。
+    """
+    from core.capabilities import mcp_json
+    from core.capabilities.paths import capabilities_enabled
+
+    st = get_state()
+    if not capabilities_enabled() or not bridge_enabled() or not st:
+        return False
+    profile = _account_profile(st)
+    if not profile:
+        return False
+    try:
+        mcp_json.set_managed_enabled(profile, str(server_id), bool(enabled))
+    except mcp_json.McpJsonError:
+        return False
+    return True
+
+
 _context_lock = threading.Lock()
 _context_cache: Optional[Tuple[tuple, Dict[str, Any]]] = None
 

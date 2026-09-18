@@ -40,10 +40,10 @@ def test_scoped_steps_keep_independent_bindings_and_reports(setup):
     )
     assert len(runtime.child_scope(first_scope, "subagent", "call-1", "agent-a")) <= 80
     first = runtime.prepare("root-run", "owner", skill_ids=["cloud-a"], scope_id=first_scope)
-    first = runtime.preflight(first, skill_ids=["cloud-a"], available_models=set())
+    first = runtime.preflight(first, available_models=set())
     first_saved = first.to_dict()
     second = runtime.prepare("root-run", "owner", skill_ids=["cloud-b"], scope_id=second_scope)
-    second = runtime.preflight(second, skill_ids=["cloud-b"], available_models=set())
+    second = runtime.preflight(second, available_models=set())
     assert first.run_id == second.run_id == "root-run"
     assert first.scope_id != second.scope_id and first.view_dir != second.view_dir
     assert set(first.bindings) == {"cloud-a"} and set(second.bindings) == {"cloud-b"}
@@ -99,6 +99,8 @@ def test_agent_snapshots_pin_per_scope_and_legacy_root_key_is_unchanged(setup):
 
 
 def test_tool_scope_recovery_allows_proven_root_and_rejects_children_and_unknown(setup):
+    from core.capabilities.errors import IntegrityFailed
+
     root = runtime.prepare("root-run", "owner", skill_ids=[])
     child = runtime.prepare(
         "root-run",
@@ -110,8 +112,6 @@ def test_tool_scope_recovery_allows_proven_root_and_rejects_children_and_unknown
     runtime.record_tool_scope(root, "root-tool", "view_text_file")
     runtime.record_tool_scope(child, "child-tool", "view_text_file")
     runtime.require_root_tool_scope("root-run", "owner", "root-tool", "view_text_file")
-    from core.capabilities.errors import IntegrityFailed
-
     with pytest.raises(IntegrityFailed):
         runtime.require_root_tool_scope("root-run", "owner", "child-tool", "view_text_file")
     with pytest.raises(IntegrityFailed):
@@ -204,7 +204,7 @@ async def test_actual_plan_steps_use_stable_independent_scopes(setup, monkeypatc
             skill_ids=kw["enabled_skill_ids"],
             scope_id=kw["capability_scope"],
         )
-        runtime.preflight(prepared, skill_ids=kw["enabled_skill_ids"], available_models=set())
+        runtime.preflight(prepared, available_models=set())
         captured.append((kw["run_id"], kw["capability_scope"], tuple(kw["enabled_skill_ids"])))
         return SimpleNamespace(state=SimpleNamespace(context=[]), reply=reply), []
 
@@ -253,7 +253,6 @@ def test_subagent_scope_uses_durable_call_not_presentation_id(setup):
     from core.llm.subagent_tool import _child_capability_runtime
     from core.llm.middlewares import CURRENT_TOOL_CALL_ID
     from core.capabilities.errors import IntegrityFailed
-
     parent = {
         "run_id": "root-run",
         "journal_owner": "owner-token",
@@ -414,8 +413,6 @@ async def test_registered_child_dispatch_has_scope_even_without_sse(setup, monke
 
 
 def test_same_ready_scope_never_replaces_its_frozen_dependency_report(setup):
-    from core.capabilities.errors import IntegrityFailed
-
     for name in ("local-a", "local-b"):
         body = "---\nname: " + name + "\ndescription: synthetic\n---\n" + name
         skills.publish_local_skill(
@@ -426,26 +423,19 @@ def test_same_ready_scope_never_replaces_its_frozen_dependency_report(setup):
         )
     scope = runtime.child_scope("", "plan", "p", "s")
     prepared = runtime.prepare("root-run", "owner", skill_ids=["local-a"], scope_id=scope)
-    frozen = runtime.preflight(prepared, skill_ids=["local-a"], available_models=set())
-    with pytest.raises(IntegrityFailed):
-        runtime.preflight(frozen, skill_ids=["local-b"], available_models=set())
-    blocked = runtime.get("root-run", scope_id=scope).dependency_report
-    assert blocked["nodes"] == frozen.dependency_report["nodes"] and blocked["state"] == "blocked"
-    subset = runtime.preflight(frozen, skill_ids=[], available_models=set())
-    assert subset.dependency_report == frozen.dependency_report
+    frozen = runtime.preflight(prepared, available_models=set())
+    # 同一个已就绪的作用域再走一遍，拿到的必须还是那份冻结报告。
+    again = runtime.preflight(frozen, available_models=set())
+    assert again.dependency_report == frozen.dependency_report
 
 
-def test_revocation_updates_readiness_without_destroying_frozen_nodes(setup):
-    from core.capabilities.errors import PermissionDenied
-
+def test_revocation_drops_the_component_without_destroying_frozen_nodes(setup):
+    """撤销一个组件只摘掉它自己，这一轮已经冻下来的依赖节点原样保留。"""
     scope = runtime.child_scope("", "plan", "p", "s")
     prepared = runtime.prepare("root-run", "owner", skill_ids=["cloud-a"], scope_id=scope)
-    frozen = runtime.preflight(prepared, skill_ids=["cloud-a"], available_models=set())
+    frozen = runtime.preflight(prepared, available_models=set())
     inst = registry.get(frozen.bindings["cloud-a"]["install_id"])
     registry.set_enabled(inst.install_id, False)
-    with pytest.raises(PermissionDenied):
-        runtime.preflight(frozen, skill_ids=["cloud-a"], available_models=set())
-    blocked = runtime.get("root-run", scope_id=scope).dependency_report
-    assert blocked["state"] == "blocked" and blocked["ready"] is False
-    assert blocked["frozen"] is True and blocked["errors"][0]["code"] == "permission_denied"
-    assert blocked["nodes"] == frozen.dependency_report["nodes"]
+    after = runtime.preflight(frozen, available_models=set())
+    assert after.unavailable["cloud-a"] == "permission_denied"
+    assert after.dependency_report["nodes"] == frozen.dependency_report["nodes"]

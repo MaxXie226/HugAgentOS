@@ -130,6 +130,16 @@ def _startup_steps():
             _ALL_ROLES,
             _SINGLETON,
         ),
+        # Per-worker on purpose: the confirmation bar a myspace overwrite raises lives
+        # in the process running that chat, so the watcher has to be there too. One
+        # change is still handled once — the workers claim it through core.infra.ephemeral.
+        (
+            _startup_myspace_registry,
+            _shutdown_myspace_registry,
+            False,
+            _ALL_ROLES,
+            _PER_WORKER,
+        ),
         (
             _startup_mcp_market_monitor,
             _shutdown_mcp_market_monitor,
@@ -192,8 +202,18 @@ async def _stop_singleton_work() -> None:
 
 
 async def _run_startup_steps(steps) -> None:
+    """依次跑这些启动步骤。
+
+    出错要喊出来：这些步骤跑在一个没人 await 的任务里，异常默默逃走之后，后面的步骤
+    也一起不跑了，而日志里一个字都没有 —— 曾经因此让一个必须常驻的后台 worker 没起来，
+    却看不出任何异常。喊完照旧中断：半跑起来的启动比不跑更难排查。
+    """
     for step in steps:
-        await step()
+        try:
+            await step()
+        except Exception:
+            logger.exception("startup_step_failed", step=step.__name__)
+            raise
 
 
 @asynccontextmanager
@@ -773,6 +793,27 @@ async def _startup_warm_sandbox_pool():
         logger.info("[startup] sandbox provider %s warmup kicked off", provider.name)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[startup] sandbox warmup failed: %s", exc)
+
+
+async def _startup_myspace_registry():
+    """Watch the myspace mirror directory and register what lands there.
+
+    Registration is deliberately not wired into the tools that write: background
+    processes, sub-agents, skill CLIs and MCP servers all write there too, and every
+    entry point left out shows up as a file the user can see in the sandbox but not
+    in "My Space". See ``core.myspace.watcher``.
+    """
+    from core.infra import runtime_state
+    from core.myspace.watcher import get_registry, start_registry
+
+    await start_registry()
+    runtime_state.register("myspace_registry", get_registry())
+
+
+async def _shutdown_myspace_registry():
+    from core.myspace.watcher import stop_registry
+
+    await stop_registry()
 
 
 async def _startup_idle_session_reaper():

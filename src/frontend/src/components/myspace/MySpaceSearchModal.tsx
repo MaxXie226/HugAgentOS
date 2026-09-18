@@ -42,7 +42,6 @@ export function MySpaceSearchModal({ onOpenChat, onPreviewFile }: Props) {
   const globalQuery = useMySpaceStore((s) => s.globalQuery);
   const setGlobalQuery = useMySpaceStore((s) => s.setGlobalQuery);
   const setTab = useMySpaceStore((s) => s.setTab);
-  const setKbTab = useCatalogStore((s) => s.setKbTab);
   const catalog = useCatalogStore((s) => s.catalog);
 
   /** 结果带上它对应的查询词：与当前输入不一致就说明还在路上，据此显示骨架屏 */
@@ -141,10 +140,10 @@ export function MySpaceSearchModal({ onOpenChat, onPreviewFile }: Props) {
               keyword={keyword}
               title={kb.name}
               sub={kb.desc}
-              onClick={() => pick(() => {
-                setKbTab(kb.visibility === 'private' || (!kb.visibility && !kb.is_public) ? 'private' : 'public');
-                setTab('kb');
-              })}
+              onClick={() => pick(() => setTab(
+                'kb',
+                kb.visibility === 'private' || (!kb.visibility && !kb.is_public) ? 'private' : 'public',
+              ))}
             />
           ))}
         </Group>

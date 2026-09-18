@@ -335,12 +335,7 @@ class Inspector:
             bound_kind, profile, stored_key = iid.split(":", 2)
             if bound_kind != kind:
                 return None, None, None
-            if binding.get("snapshot_path"):
-                from .runtime import _component
-
-                comp = _component(binding)
-            else:
-                comp = store.get(kind, profile, stored_key, binding["revision"])
+            comp = store.get(kind, profile, stored_key, binding["revision"])
             return iid, self.installation(iid), comp
         iid = registry.install_id(kind, profile, key)
         inst = self.installation(iid)

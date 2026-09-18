@@ -67,6 +67,8 @@ class DeferredPlugin:
     # NOT subtracted from the base assembly, since they may be shared with
     # non-plugin skills.
     bound_mcp_ids: List[str] = field(default_factory=list)
+    # 推迟时记下的定义身份（插件与它绑定的智能体）。激活那一刻按这份身份复查：
+    # 中间用户可能已经把它停用、卸载，或者定义文件被改过。
     capability_nodes: List[dict] = field(default_factory=list)
     unavailable_mcp_ids: Set[str] = field(default_factory=set)
 
@@ -230,7 +232,6 @@ def resolve_sticky_plugin_capabilities(
     *,
     user_id: str,
     chat_id: Optional[str],
-    allow_unavailable=False,
 ) -> StickyPluginCapabilities:
     """Resolve durable plugin activations before normal capability narrowing.
 
@@ -251,7 +252,7 @@ def resolve_sticky_plugin_capabilities(
     cloud = _cloud_sticky_selection(
         tokens,
         user_id=user_id,
-        unavailable_out=result.unavailable_ids if allow_unavailable else None,
+        unavailable_out=result.unavailable_ids,
     )
     if cloud:
         from core.capabilities.plugins import cloud_binding_ids
@@ -262,8 +263,6 @@ def resolve_sticky_plugin_capabilities(
             try:
                 skill_ids, mcp_ids = cloud_binding_ids([row.install_id], user_id=user_id)
             except (CapabilityError, OSError, ValueError):
-                if not allow_unavailable:
-                    raise
                 result.unavailable_ids.append(row.install_id)
                 continue
             result.install_ids.append(row.install_id)
@@ -631,7 +630,6 @@ def resolve_desktop_progressive_plugins(
     activated_ids=(),
     invoked_skill_ids=(),
     invoked_mcp_ids=(),
-    allow_unavailable=False,
 ):
     """Defer an authorized device plugin without changing the run's source selection.
 
@@ -656,8 +654,6 @@ def resolve_desktop_progressive_plugins(
         try:
             ensure_cloud_ready(user_id, skill_keys=[skill])
         except (CapabilityError, OSError, ValueError):
-            if not allow_unavailable:
-                raise
             result.unavailable_skill_ids.add(skill)
     choices = skills.resolve_for_user(user_id)
     bindings = {
@@ -698,17 +694,14 @@ def resolve_desktop_progressive_plugins(
                 advertised_skills & allowed_skills or advertised_mcp & allowed_mcp
             ):
                 continue
-            from core.capabilities.errors import PackageMissing
             from core.services import desktop_cloud_bridge, desktop_cloud_bundles
 
             results = desktop_cloud_bundles.prepare(
                 desktop_cloud_bridge.get_state(), [row.install_id]
             )
             if not results or not results[0]["ok"]:
-                if allow_unavailable:
-                    result.unavailable_skill_ids.update(advertised_skills & allowed_skills)
-                    continue
-                raise PackageMissing("selected plugin definition is not ready", ref=row.install_id)
+                result.unavailable_skill_ids.update(advertised_skills & allowed_skills)
+                continue
             installations = {
                 item.install_id: item for item in registry.list_installations(include_removed=True)
             }
@@ -774,14 +767,11 @@ def resolve_desktop_progressive_plugins(
         )
         return item, aliases, skill_ids, mcp_ids
 
-    strict_inspect_plugin = inspect_plugin
-
-    def inspect_plugin(prepared):
+    def inspect_plugin_or_skip(prepared):
+        """一个装不起来的插件只是这一轮不出现，不牵连别的插件。"""
         try:
-            return strict_inspect_plugin(prepared)
+            return inspect_plugin(prepared)
         except (CapabilityError, OSError, ValueError):
-            if not allow_unavailable:
-                raise
             return None
 
     # Downloads above are serial. Workers share only the completed detached
@@ -792,11 +782,11 @@ def resolve_desktop_progressive_plugins(
 
         with ThreadPoolExecutor(max_workers=4, thread_name_prefix="cap-plugins") as pool:
             pending = [
-                pool.submit(copy_context().run, inspect_plugin, row) for row in prepared_rows
+                pool.submit(copy_context().run, inspect_plugin_or_skip, row) for row in prepared_rows
             ]
             inspected = [future.result() for future in pending]
     else:
-        inspected = map(inspect_plugin, prepared_rows)
+        inspected = map(inspect_plugin_or_skip, prepared_rows)
     for resolved in inspected:
         if resolved is None:
             continue
@@ -805,14 +795,6 @@ def resolve_desktop_progressive_plugins(
             # An installed instruction is not a working plugin. Never advertise
             # a skill-only activation when its required tool binding is absent,
             # nor substitute another account's similarly named connector.
-            if aliases.intersection(active) and not allow_unavailable:
-                from core.capabilities.errors import PackageMissing
-
-                raise PackageMissing(
-                    "selected plugin requires unavailable MCP servers: "
-                    + ", ".join(sorted(item.unavailable_mcp_ids)),
-                    ref=item.install_id,
-                )
             result.unavailable_skill_ids.update(skill_ids)
             logger.info(
                 "[plugin-loader] plugin %s unavailable: missing MCP %s",
@@ -1002,10 +984,17 @@ def register_load_plugin(
 
         prepared = runtime.get("prepared_run")
         if prepared is not None:
-            from core.capabilities.runtime import validate
+            from core.capabilities.runtime import validate, validate_activation
 
             await asyncio.to_thread(
                 validate, prepared, user_id=runtime.get("user_id", prepared.user_id)
+            )
+            # 展开这个插件的技能之前，按推迟时记下的身份复查它自己。
+            await asyncio.to_thread(
+                validate_activation,
+                prepared,
+                target.capability_nodes,
+                available_mcp=set(runtime.get("prepared_servers") or {}),
             )
 
         new_tool_names: List[str] = []

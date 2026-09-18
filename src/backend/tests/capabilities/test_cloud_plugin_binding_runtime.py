@@ -2,10 +2,10 @@
 
 import json
 import pytest
-from core.capabilities import plugins, registry, runtime, skills, store, dependency
+from core.capabilities import plugins, registry, runtime, skills, store
 from core.capabilities.ref import cloud_ref, profile_id
 from core.capabilities.paths import revision_for_hash
-from core.capabilities.errors import IntegrityFailed, PackageMissing
+from core.capabilities.errors import IntegrityFailed
 from core.services import desktop_cloud_bridge as bridge
 from core.services.desktop_capability_protocol import entity_content_hash, skill_content_hash
 from tests.capabilities.test_runtime_recovery import state, durable_index
@@ -52,10 +52,11 @@ def test_factory_expands_cloud_plugin_without_local_installed_plugin_row(
     assert skill_ids == ["pack-skill"] and mcp_ids == ["pack-search"]
     assert not registry.get(skill.install_id).ready
     assert store.revisions("skill", skill.profile_id, skill.key) == []
-    with pytest.raises(PackageMissing):
-        runtime.prepare(
-            "not-auto-prepared", "local-owner", skill_ids=skill_ids, plugin_ids=["pack@cloud-owner"]
-        )
+    # 云端技能还没下载下来：这一份记成不可用，不影响这一轮别的能力。
+    not_prepared = runtime.prepare(
+        "not-auto-prepared", "local-owner", skill_ids=skill_ids, plugin_ids=["pack@cloud-owner"]
+    )
+    assert "pack-skill" in not_prepared.unavailable
     prepared = store.write_from_files(
         "skill",
         skill.profile_id,
@@ -68,7 +69,7 @@ def test_factory_expands_cloud_plugin_without_local_installed_plugin_row(
         "explicitly-prepared", "local-owner", skill_ids=skill_ids, plugin_ids=["pack@cloud-owner"]
     )
     ready = runtime.preflight(
-        run, skill_ids=skill_ids, plugin_ids=["pack@cloud-owner"], available_mcp=mcp_ids
+        run, plugin_ids=["pack@cloud-owner"], available_mcp=mcp_ids
     )
     assert ready.dependency_report["ready"]
 
@@ -96,12 +97,11 @@ def test_blocked_preflight_persists_safe_report_before_raising(
         owner_user_id="owner",
     )
     run = runtime.prepare("blocked-dependencies", "owner", skill_ids=["local"])
-    with pytest.raises(dependency.DependencyMissing):
-        runtime.preflight(run, skill_ids=["local"], available_mcp=[])
+    runtime.preflight(run, available_mcp=[])
     report = runtime.get(run.run_id).dependency_report
-    assert report["state"] == "blocked" and not report["ready"]
-    assert report["error"]["code"] == "dependency_missing"
-    assert report["errors"][0]["dependency_chain"][-1] == "mcp:search"
+    assert [row["skill_id"] for row in report["unavailable_skills"]] == ["local"]
+    # 报告会被持久化，所以里面绝不能夹带技能正文。
     assert "REPORT_CONTENT_CANARY" not in json.dumps(report)
-    ready = runtime.preflight(run, skill_ids=["local"], available_mcp=["search"])
-    assert ready.dependency_report["state"] == "ready" and "error" not in ready.dependency_report
+    fresh = runtime.prepare("unblocked-dependencies", "owner", skill_ids=["local"])
+    ready = runtime.preflight(fresh, available_mcp=["search"])
+    assert ready.dependency_report["state"] == "ready" and not ready.unavailable

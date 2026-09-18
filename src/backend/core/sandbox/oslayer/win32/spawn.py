@@ -1,4 +1,4 @@
-"""Starting a process under a restricted token, and waiting for it.
+"""Starting a process under the sandbox token, and waiting for it.
 
 ``subprocess`` cannot attach a token to a child, so the launch goes through
 ``CreateProcessAsUserW`` directly. The returned object exposes the small slice
@@ -20,6 +20,7 @@ import ctypes
 import msvcrt
 import os
 import subprocess
+from collections.abc import Callable
 from ctypes import wintypes
 
 from . import ffi
@@ -35,16 +36,23 @@ def _environment_block(env: dict[str, str]) -> ctypes.Array:
 
 
 class TokenProcess:
-    """A process running under a restricted token.
+    """A process running under the sandbox token.
 
     ``returncode`` is read from the OS on demand rather than delivered by a
     callback, so a caller that polls it — as the runner does — sees the exit as
     soon as it happens without needing a watcher of its own.
     """
 
-    def __init__(self, handle: wintypes.HANDLE, thread: wintypes.HANDLE, pid: int) -> None:
+    def __init__(
+        self,
+        handle: wintypes.HANDLE,
+        thread: wintypes.HANDLE,
+        pid: int,
+        on_close: Callable[[], None] | None = None,
+    ) -> None:
         self._handle = handle
         self._thread = thread
+        self._on_close = on_close
         self.pid = pid
         self._returncode: int | None = None
 
@@ -76,6 +84,9 @@ class TokenProcess:
                 ffi.CloseHandle(handle)
         self._thread = None
         self._handle = None
+        if self._on_close is not None:
+            self._on_close, callback = None, self._on_close
+            callback()
 
 
 def spawn_with_token(
@@ -87,10 +98,11 @@ def spawn_with_token(
     stdin: int,
     stdout: int,
     stderr: int,
+    on_close: Callable[[], None] | None = None,
 ) -> TokenProcess:
     """Start ``command`` under ``token``; the three stdio arguments are fds."""
     if not command:
-        raise ValueError("受限令牌启动缺少要执行的命令")
+        raise ValueError("沙箱启动缺少要执行的命令")
 
     handles = [msvcrt.get_osfhandle(fd) for fd in (stdin, stdout, stderr)]
     for handle in handles:
@@ -119,7 +131,9 @@ def spawn_with_token(
         ),
         "CreateProcessAsUserW",
     )
-    return TokenProcess(information.hProcess, information.hThread, int(information.dwProcessId))
+    return TokenProcess(
+        information.hProcess, information.hThread, int(information.dwProcessId), on_close
+    )
 
 
 __all__ = ["TokenProcess", "spawn_with_token"]

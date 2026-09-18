@@ -15,7 +15,7 @@ use std::convert::Infallible;
 
 use axum::{
     body::Body,
-    extract::State,
+    extract::{Path, State},
     http::{header, HeaderMap, Method, Request, StatusCode, Uri},
     response::{
         sse::{Event, KeepAlive, Sse},
@@ -53,6 +53,16 @@ pub struct ProxyState {
     pub local_base: String,
     /// 仅 Dual 为 true：启用按请求路由（x-hugagent-target: local → 本机）。
     pub hybrid_local: bool,
+    /// 标题栏「视图 → 放大 / 缩小」的动作出口，投递的是与原生菜单同一套动作 id。
+    ///
+    /// 缩放不能走标题栏其它动作那套导航哨兵：哨兵靠发起一次随即被 `on_navigation` 取消的
+    /// 导航来传话，而 WebView2 会在导航生命周期里把 ZoomFactor 重置回 1.0，刚设上的档位
+    /// 当场失效。Tauri IPC 也不可用——反代是远程源，实测自定义命令（含既有的
+    /// `logout_desktop`）一律被 ACL 拒绝。
+    ///
+    /// 另一面是作用域：哨兵在 `on_navigation` 闭包里捕获了发起窗口的 label，天然是
+    /// 「窗口作用域」动作；缩放是应用全局档位，本就不需要窗口身份，走 fetch 没有损失。
+    pub zoom_tx: tokio::sync::mpsc::UnboundedSender<String>,
     /// 桥接秘密：本机路由请求注入 `X-Desktop-Bridge` 证明来自壳。
     pub bridge_secret: String,
     /// base64 编码的云端用户信息（登录后由 hybrid::on_cloud_login 填充）。
@@ -112,6 +122,7 @@ pub async fn serve(state: ProxyState, web_dir: PathBuf) -> std::io::Result<u16> 
         .route("/__desktop/setup/status", get(setup_status))
         .route("/__desktop/setup/install", post(start_local_install))
         .route("/__desktop/events", get(desktop_events))
+        .route("/__desktop/zoom/:action", post(zoom_action))
         .route("/__desktop/update/status", get(|| async { Json(crate::update::status()) }))
         .route("/api", any(proxy_handler))
         .route("/api/*rest", any(proxy_handler))
@@ -306,6 +317,16 @@ async fn close_confirm_page() -> Html<String> {
     Html(with_theme_boot(
         &CLOSE_CONFIRM_HTML.replace("HugAgentOS", brand::NAME),
     ))
+}
+
+/// 把标题栏的缩放动作转给壳层。动作 id 与原生菜单共用，这里只做白名单校验，
+/// 「哪个 id 对应哪一档」只在 `menu::dispatch_for_window` 定义一处。
+async fn zoom_action(State(state): State<ProxyState>, Path(action): Path<String>) -> StatusCode {
+    if !matches!(action.as_str(), "zoom_in" | "zoom_out" | "zoom_reset") {
+        return StatusCode::BAD_REQUEST;
+    }
+    let _ = state.zoom_tx.send(action);
+    StatusCode::NO_CONTENT
 }
 
 /// 「设置服务器地址」页（菜单栏「文件 → 设置服务器地址…」打开）。输入框预填当前后端地址，
@@ -599,6 +620,11 @@ const TB_MENU: &str = r##"<nav class="tb-menu" aria-label="应用菜单" data-i1
 </div></div>
 <div class="tb-menuGroup" data-menu="view"><button class="tb-menuLabel" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="hugagent-view-menu" data-i18n="view">视图</button><div class="tb-drop" id="hugagent-view-menu" role="menu" aria-label="视图" data-i18n-aria="view">
   <button class="tb-item" type="button" role="menuitem" tabindex="-1" data-act="reload"><span data-i18n="reload">重新加载</span><span class="tb-shortcut" aria-hidden="true">Ctrl+R</span></button>
+  <div class="tb-sep" role="separator"></div>
+  <button class="tb-item" type="button" role="menuitem" tabindex="-1" data-act="zoom_in"><span data-i18n="zoom_in">放大</span><span class="tb-shortcut" aria-hidden="true">Ctrl++</span></button>
+  <button class="tb-item" type="button" role="menuitem" tabindex="-1" data-act="zoom_out"><span data-i18n="zoom_out">缩小</span><span class="tb-shortcut" aria-hidden="true">Ctrl+-</span></button>
+  <button class="tb-item" type="button" role="menuitem" tabindex="-1" data-act="zoom_reset"><span data-i18n="zoom_reset">实际大小</span><span class="tb-shortcut" aria-hidden="true">Ctrl+0</span></button>
+  <div class="tb-sep" role="separator"></div>
   <button class="tb-item" type="button" role="menuitem" tabindex="-1" data-win="fullscreen"><span data-i18n="fullscreen">全屏</span><span class="tb-shortcut" aria-hidden="true">F11</span></button>
 </div></div>
 <div class="tb-menuGroup" data-menu="help"><button class="tb-menuLabel" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="hugagent-help-menu" data-i18n="help">帮助</button><div class="tb-drop" id="hugagent-help-menu" role="menu" aria-label="帮助" data-i18n-aria="help">
@@ -627,6 +653,7 @@ var desktopCopy={
     file:'文件',edit:'编辑',view:'视图',help:'帮助',new_chat:'新建对话',new_window:'新建窗口',run_mode:'运行模式…',open_folder:'打开文件夹…',
     server_config:'设置服务器地址…',local_server:'本机服务…',quit:'退出',undo:'撤销',redo:'重做',
     cut:'剪切',copy:'复制',paste:'粘贴',select_all:'全选',reload:'重新加载',fullscreen:'全屏',
+    zoom_in:'放大',zoom_out:'缩小',zoom_reset:'实际大小',
     check_update:'检查更新…',website:'访问官网',about:'关于',minimize:'最小化',
     maximize_restore:'最大化 / 还原',close:'关闭'
   },
@@ -635,6 +662,7 @@ var desktopCopy={
     file:'File',edit:'Edit',view:'View',help:'Help',new_chat:'New Chat',new_window:'New Window',run_mode:'Run Mode…',open_folder:'Open Folder…',
     server_config:'Server Address…',local_server:'Local Service…',quit:'Exit',undo:'Undo',redo:'Redo',
     cut:'Cut',copy:'Copy',paste:'Paste',select_all:'Select All',reload:'Reload',fullscreen:'Full Screen',
+    zoom_in:'Zoom In',zoom_out:'Zoom Out',zoom_reset:'Actual Size',
     check_update:'Check for Updates…',website:'Visit Website',about:'About',minimize:'Minimize',
     maximize_restore:'Maximize / Restore',close:'Close'
   }
@@ -686,6 +714,10 @@ function adjacentGroup(group,delta){
   var index=groups.indexOf(group);return groups[(index+delta+groups.length)%groups.length];
 }
 function sentinel(path){window.location.href=path;}
+// 缩放不能走哨兵：那次「发起即取消」的导航会让 WebView2 把 ZoomFactor 重置回 1.0，刚设上的
+// 档位当场失效。改用 fetch 投递给本地反代，不碰导航。动作 id 与原生菜单同名。
+function shellZoom(action){fetch('/__desktop/zoom/'+action,{method:'POST'});}
+var ZOOM_KEYS={'=':'zoom_in','+':'zoom_in','add':'zoom_in','-':'zoom_out','_':'zoom_out','subtract':'zoom_out','0':'zoom_reset'};
 var lastEditTarget=null;
 document.addEventListener('focusin',function(event){if(!bar.contains(event.target))lastEditTarget=event.target;});
 document.addEventListener('keydown',function(event){
@@ -694,10 +726,21 @@ document.addEventListener('keydown',function(event){
     event.preventDefault();sentinel('/__desktop/menu?action='+(event.shiftKey?'new_window':'new_chat'));
   }else if(event.ctrlKey&&!event.altKey&&key==='r'){
     event.preventDefault();sentinel('/__desktop/menu?action=reload');
+  }else if(event.ctrlKey&&!event.altKey&&ZOOM_KEYS[key]){
+    event.preventDefault();shellZoom(ZOOM_KEYS[key]);
   }else if(event.key==='F11'){
     event.preventDefault();sentinel('/__desktop/win?action=fullscreen');
   }
 });
+// Ctrl+滚轮同样交给壳层。保持 passive：WebView 的原生缩放热键本就是关的（Tauri
+// zoom_hotkeys_enabled 默认 false），没有默认行为要拦；而 non-passive 的 wheel 监听会让
+// 整个文档退出合成器线程滚动，把长对话列表的滚动一起拖慢。
+var wheelZoomAt=0;
+window.addEventListener('wheel',function(event){
+  if(!event.ctrlKey)return;
+  var now=Date.now();if(now-wheelZoomAt<120)return;wheelZoomAt=now;
+  shellZoom(event.deltaY<0?'zoom_in':'zoom_out');
+},{passive:true});
 groups.forEach(function(group){
   var label=group.querySelector('.tb-menuLabel');var drop=group.querySelector('.tb-drop');
   label.addEventListener('click',function(event){
@@ -728,7 +771,10 @@ bar.querySelectorAll('[data-win]').forEach(function(item){item.addEventListener(
   event.stopPropagation();closeMenus(false);sentinel('/__desktop/win?action='+encodeURIComponent(item.dataset.win));
 });});
 bar.querySelectorAll('[data-act]').forEach(function(item){item.addEventListener('click',function(event){
-  event.stopPropagation();closeMenus(false);sentinel('/__desktop/menu?action='+encodeURIComponent(item.dataset.act));
+  event.stopPropagation();closeMenus(false);
+  var action=item.dataset.act;
+  if(action.indexOf('zoom_')===0)shellZoom(action);
+  else sentinel('/__desktop/menu?action='+encodeURIComponent(action));
 });});
 bar.querySelectorAll('[data-edit]').forEach(function(item){item.addEventListener('click',function(event){
   event.stopPropagation();var command=item.dataset.edit;closeMenus(false);

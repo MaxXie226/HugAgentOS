@@ -4524,6 +4524,21 @@ def get_active_run_for_chat(chat_id: str, user_id: str) -> Optional[ChatRun]:
         return None
 
 
+def has_local_runs() -> bool:
+    """这个进程手上有没有正在跑的 run。
+
+    用来在查库之前便宜地排掉"本进程什么都没在跑"的情况 —— 谁在跑哪个 run 只有进程自己
+    知道（``_active_runs`` 是进程内的），而有些判断必须落到具体进程上：确认条的 pending
+    与前端信号队列都活在进程里，只有执行这个 run 的进程弹得出来。
+    """
+    return bool(_active_runs)
+
+
+def is_local_run(run_id: str) -> bool:
+    """这个 run 是不是由本进程在执行。"""
+    return run_id in _active_runs
+
+
 def list_active_runs_for_user(user_id: str) -> List[ChatRun]:
     """Backing query for GET /v1/chats/active-runs — one live run per chat.
 

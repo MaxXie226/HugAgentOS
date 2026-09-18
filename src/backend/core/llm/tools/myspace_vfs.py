@@ -406,6 +406,7 @@ def sync_upsert(
     logical_path: str,
     content: bytes,
     scope: Optional[ProjectScope] = None,
+    mirror: bool = True,
 ) -> Optional[dict[str, Any]]:
     """Reverse-sync a write to ``/myspace/<folder>/<file>`` into MySpace.
 
@@ -436,8 +437,11 @@ def sync_upsert(
     name = filename
     mime = _guess_mime(name)
 
-    # 1. Mirror into the cache first (even if the subsequent DB step fails, the next seed still sees it)
-    mirror_to_cache(user_id, rel, content)
+    # 1. Mirror into the cache first (even if the subsequent DB step fails, the next seed still sees it).
+    #    ``mirror=False`` means the bytes were just read from that very cache file — writing
+    #    them back would only produce another filesystem event for the watcher to judge.
+    if mirror:
+        mirror_to_cache(user_id, rel, content)
 
     try:
         from core.db.engine import SessionLocal

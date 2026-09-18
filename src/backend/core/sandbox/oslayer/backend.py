@@ -158,9 +158,9 @@ def get_platform_backend(platform: Optional[str] = None) -> Optional[SandboxBack
 
         return BubblewrapBackend()
     if target == "windows":
-        from .windows_token import WindowsRestrictedTokenBackend
+        from .windows_token import WindowsLowIntegrityBackend
 
-        return WindowsRestrictedTokenBackend()
+        return WindowsLowIntegrityBackend()
     return None
 
 

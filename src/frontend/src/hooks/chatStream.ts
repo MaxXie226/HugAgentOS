@@ -1,5 +1,6 @@
 import { message } from 'antd';
 import { t } from '../i18n';
+import { panelFromPath } from '../routing/navigation';
 import {
   getChatContextState,
   listChatJobs,
@@ -189,7 +190,7 @@ function canAutoOpenCanvas(): boolean {
 
 function canOpenPluginCanvasForChat(chatId: string): boolean {
   return useChatStore.getState().currentChatId === chatId
-    && useCatalogStore.getState().panel === 'chat'
+    && panelFromPath() === 'chat'
     && canAutoOpenCanvas();
 }
 
@@ -723,7 +724,7 @@ export async function processChatStream(resp: Response, opts: ChatStreamOptions)
     // A background stream must not replace the panel in the chat the user is
     // currently reading. The result remains available from its message entry.
     if (useChatStore.getState().currentChatId !== chatId) return;
-    if (useCatalogStore.getState().panel !== 'chat') return;
+    if (panelFromPath() !== 'chat') return;
     // 移动端不自动弹（整屏覆盖），评审结论仍可从消息里的入口打开。
     if (!canAutoOpenCanvas()) return;
     useCanvasStore.getState().openOntology({ chatId, messageUid: bubbleUid });

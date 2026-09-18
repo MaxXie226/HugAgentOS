@@ -7,6 +7,7 @@ from core.llm.subagent_tool import _shared_ontology_runtime, build_explicit_suba
 from core.services.subagent_routing_service import parse_explicit_subagent_command
 from fastapi import HTTPException
 from orchestration import workflow
+from orchestration.memory_integration import SessionMemory
 
 
 class _FakeUserAgentService:
@@ -302,13 +303,13 @@ def test_dedicated_builtin_chat_preserves_role_write_boundaries():
 @pytest.mark.asyncio
 async def test_mention_keeps_normal_main_model_stream(monkeypatch):
     async def _fake_memory_retrieval(*_args, **_kwargs):
-        return None
+        return SessionMemory(chat_id="", scope_user_id="", workspace_id="default", memory_enabled=False)
 
     async def _unexpected_direct(**_kwargs):
         raise AssertionError("@mention must not bypass the main model")
         yield  # pragma: no cover
 
-    monkeypatch.setattr(workflow, "launch_memory_retrieval", _fake_memory_retrieval)
+    monkeypatch.setattr(workflow, "open_session_memory", _fake_memory_retrieval)
     monkeypatch.setattr(workflow, "_astream_subagent_direct", _unexpected_direct)
     stream = workflow.astream_chat_workflow(
         session_messages=[{"role": "user", "content": "分析企业风险"}],
@@ -346,9 +347,9 @@ def test_explicit_command_hint_guides_subagent_usage():
 @pytest.mark.asyncio
 async def test_natural_language_command_keeps_normal_main_model_stream(monkeypatch):
     async def _fake_memory_retrieval(*_args, **_kwargs):
-        return None
+        return SessionMemory(chat_id="", scope_user_id="", workspace_id="default", memory_enabled=False)
 
-    monkeypatch.setattr(workflow, "launch_memory_retrieval", _fake_memory_retrieval)
+    monkeypatch.setattr(workflow, "open_session_memory", _fake_memory_retrieval)
     stream = workflow.astream_chat_workflow(
         session_messages=[{"role": "user", "content": "分析杭州量知的风险"}],
         user_message="分析杭州量知的风险",

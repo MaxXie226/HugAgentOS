@@ -2,6 +2,8 @@ import { DesktopUpdateEntry } from '../../desktop/DesktopUpdateEntry';
 import { useDesktopUpdateStatus } from '../../desktop/useDesktopUpdateStatus';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { DragEvent as ReactDragEvent } from 'react';
+import { usePanel } from '../../routing/usePanel';
+import { abilitySlug, useAbilityTab } from '../../routing/subPages';
 import { AnimatePresence, motion } from 'motion/react';
 import {
   Layout, Input, Dropdown, Tooltip, Badge, Modal, message,
@@ -17,7 +19,6 @@ import {
   MessageOutlined, SortAscendingOutlined,
 } from '@ant-design/icons';
 import { useUIStore, useChatStore, useAuthStore, useMySpaceStore, useAutomationChatStore, useAutomationStore, useSidebarOrderStore } from '../../stores';
-import { useCatalogStore } from '../../stores/catalogStore';
 import { useProjectStore } from '../../stores/projectStore';
 import { useDeploymentModeStore } from '../../stores/deploymentModeStore';
 import { usePageConfig, usePageConfigAll } from '../../hooks/usePageConfig';
@@ -79,7 +80,8 @@ interface SidebarProps {
   onCommitRename: (id: string) => void;
   onExportChat: (id: string) => void;
   onSelectChat: (id: string) => void;
-  onSetPanel: (p: PanelKey) => void;
+  /** `sub` 是面板内的二级页（能力中心的类别），必须随这一次进入一起给出。 */
+  onSetPanel: (p: PanelKey, sub?: string) => void;
 }
 
 
@@ -115,9 +117,8 @@ export function Sidebar({
   const historyItemHeight = useIsMobileViewport() ? HISTORY_ITEM_H_MOBILE : HISTORY_ITEM_H;
   const sidebarLayoutKeys = usePageConfig<string[]>('navigation.sidebar_items', DEFAULT_SIDEBAR_ITEMS);
   const menuLayoutKeys = usePageConfig<string[]>('navigation.menu_items', DEFAULT_MENU_ITEMS);
-  const { panel } = useCatalogStore();
-  const abilityTab = useCatalogStore((s) => s.abilityTab);
-  const setAbilityTab = useCatalogStore((s) => s.setAbilityTab);
+  const panel = usePanel();
+  const abilityTab = useAbilityTab();
   const notifUnreadCount = useMySpaceStore((s) => s.notifUnreadCount);
   const sidebarTasks = useAutomationChatStore((s) => s.sidebarTasks);
   const sidebarPrefs = useAutomationChatStore((s) => s.sidebarPrefs);
@@ -374,7 +375,6 @@ export function Sidebar({
 
   const openProjectPanel = (projectId: string) => {
     void useProjectStore.getState().openProject(projectId);
-    onSetPanel('project_detail');
   };
 
   const toggleProjectPinned = async (group: SidebarProjectGroup) => {
@@ -637,10 +637,7 @@ export function Sidebar({
             children: meta.children.map((child) => ({
               key: `${key}-${child.key}`,
               label: abilityTabLabel(child.key, child.label),
-              onClick: () => {
-                setAbilityTab(child.key);
-                onSetPanel(meta.targetPanel);
-              },
+              onClick: () => onSetPanel(meta.targetPanel, abilitySlug(child.key)),
             })),
           }
           : {
@@ -900,10 +897,7 @@ export function Sidebar({
                           className={`jx-navSubItem${
                             panel === meta.targetPanel && abilityTab === child.key ? ' active' : ''
                           }`}
-                          onClick={() => {
-                            setAbilityTab(child.key);
-                            onSetPanel(meta.targetPanel);
-                          }}>
+                          onClick={() => onSetPanel(meta.targetPanel, abilitySlug(child.key))}>
                           <span>{abilityTabLabel(child.key, child.label)}</span>
                         </button>
                       ))}

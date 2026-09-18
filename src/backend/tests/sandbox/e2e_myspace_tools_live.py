@@ -113,7 +113,6 @@ async def main():
         chat_id=chat_id,
         sandbox_session_id=chat_id,
         user_id=USER_ID,
-        interactive=False,
     )
     register_sandbox_get_artifact(
         tk, chat_id=chat_id, sandbox_session_id=chat_id, user_id=USER_ID
