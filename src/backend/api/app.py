@@ -184,7 +184,7 @@ def _startup_steps():
             _ALL_ROLES,
             _PER_WORKER,
         ),
-        (_startup_recover_persona_distill_jobs, None, False, _SERVICE_ONLY, _SINGLETON),
+        (_startup_persona_distill_worker, _shutdown_persona_distill_worker, False, _SERVICE_ONLY, _PER_WORKER),
         (_startup_warmup_memory, None, False, _ALL_ROLES, _PER_WORKER),
         (_startup_channel_manager, _shutdown_channel_manager, False, _SERVICE_ONLY, _SINGLETON),
         (_startup_channel_desktop, _shutdown_channel_desktop, False, _ALL_ROLES, _SINGLETON),
@@ -1419,6 +1419,7 @@ async def _startup_channel_manager():
 
 
 _automation_scheduler = None
+_persona_distill_worker = None
 _kb_wiki_worker = None
 _kb_index_worker = None
 _distillation_scheduler = None
@@ -1496,16 +1497,28 @@ async def _startup_distillation_scheduler():
         logger.warning("[startup] Distillation cron scheduler failed to start: %s", exc)
 
 
-async def _startup_recover_persona_distill_jobs():
-    """After a process restart, set orphan persona distillation jobs (queued/running) to failed."""
-    try:
-        from core.services.edition_startup import recover_persona_distill_jobs
+async def _startup_persona_distill_worker():
+    """Start the persona distillation queue worker.
 
-        n = recover_persona_distill_jobs()
-        if n:
-            logger.info("[startup] persona distill: marked %d orphan job(s) as failed", n)
+    Per-worker, not singleton: it claims each job with FOR UPDATE SKIP LOCKED, which is
+    exactly the criterion stated at the top of this file — and a user waiting on 发起蒸馏
+    should not depend on which worker took the HTTP request.
+    """
+    try:
+        from orchestration.schedulers.persona_distill_worker import PersonaDistillWorker
+
+        global _persona_distill_worker
+        _persona_distill_worker = PersonaDistillWorker()
+        await _persona_distill_worker.start()
     except Exception as exc:
-        logger.warning("[startup] persona distill orphan recovery failed: %s", exc)
+        logger.warning("[startup] persona distill worker failed to start: %s", exc)
+
+
+async def _shutdown_persona_distill_worker():
+    global _persona_distill_worker
+    if _persona_distill_worker is not None:
+        await _persona_distill_worker.stop()
+        _persona_distill_worker = None
 
 
 async def _startup_warmup_memory():

@@ -182,8 +182,6 @@ def apply_local_env(port: int) -> dict:
         # vite config all reference a container-canonical /opt/site-template + /workspace.
         # In local mode we provision the template under the data dir and point the
         # scripts at the real workspace via these envs (Docker keeps its baked defaults).
-        "SITE_TEMPLATE_HOME": str(_site_template_home()),
-        "SITE_TEMPLATE_DIR": str(_site_template_home() / "react-vite"),
         "SITE_NODE_BASE": str(dd / "workspace" / ".site-node"),
         "PORT": str(port),
     }
@@ -191,6 +189,18 @@ def apply_local_env(port: int) -> dict:
         defaults["FRONTEND_DIST_DIR"] = dist
     for k, v in defaults.items():
         os.environ.setdefault(k, v)
+
+    # Deliberately after the loop above: ``core.services`` pulls in
+    # ``core.config.settings``, and ``settings`` snapshots the environment the
+    # first time it is imported. Resolving the site-template path while building
+    # ``defaults`` would freeze a settings object that predates
+    # ``DEPLOY_PROFILE=local`` — the whole process would then run as a non-local
+    # deployment (no ``/api`` prefix bridge, no static frontend, mock auth).
+    site_home = _site_template_home()
+    defaults["SITE_TEMPLATE_HOME"] = str(site_home)
+    defaults["SITE_TEMPLATE_DIR"] = str(site_home / "react-vite")
+    os.environ.setdefault("SITE_TEMPLATE_HOME", defaults["SITE_TEMPLATE_HOME"])
+    os.environ.setdefault("SITE_TEMPLATE_DIR", defaults["SITE_TEMPLATE_DIR"])
     return defaults
 
 
