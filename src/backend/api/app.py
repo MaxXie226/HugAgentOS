@@ -112,6 +112,7 @@ def _startup_steps():
         (_startup_seed_mcp_servers, None, True, _ALL_ROLES, _SINGLETON),
         (_startup_seed_default_plugins, None, True, _ALL_ROLES, _SINGLETON),
         (_startup_upgrade_sites_plugin, None, True, _ALL_ROLES, _SINGLETON),
+        (_startup_plugin_device_assets, None, False, _ALL_ROLES, _SINGLETON),
         # Runs after the plugin seeding/upgrade steps above, which rewrite manifests
         # and are exactly what can leave a server with display-only tool entries.
         (_startup_backfill_tool_schemas, None, False, _ALL_ROLES, _SINGLETON),
@@ -162,10 +163,16 @@ def _startup_steps():
             _ALL_ROLES,
             _SINGLETON,
         ),
-        # The next six claim each unit of work before doing it — a queued
+        # Singleton, not per-worker: one wiki ingest job may spend thousands of
+        # LLM calls behind two inner thread pools and batches five jobs at a
+        # time, so a second copy doubles both its resident set and the gateway
+        # quota it takes from live chats — and two of them on one KB lose
+        # writes (see claim_next_job). This is the only cross-process guarantee
+        # there is; claim_next_job only narrows the window.
+        (_startup_kb_wiki_worker, _shutdown_kb_wiki_worker, False, _SERVICE_ONLY, _SINGLETON),
+        # The next five claim each unit of work before doing it — a queued
         # document, an outbox row, a day — so every worker may run them and the
         # queue-shaped ones drain faster for it. See ``_PER_WORKER`` above.
-        (_startup_kb_wiki_worker, _shutdown_kb_wiki_worker, False, _SERVICE_ONLY, _PER_WORKER),
         (_startup_kb_index_worker, _shutdown_kb_index_worker, False, _SERVICE_ONLY, _PER_WORKER),
         (_startup_distillation_scheduler, None, False, _SERVICE_ONLY, _PER_WORKER),
         (_startup_evolution_scheduler, None, False, _SERVICE_ONLY, _PER_WORKER),
@@ -1036,6 +1043,31 @@ async def _startup_upgrade_sites_plugin():
     count = await asyncio.to_thread(upgrade)
     if count:
         logger.info("[startup] upgraded %d builtin sites installation(s)", count)
+
+
+async def _startup_plugin_device_assets():
+    """给这台机器上已有的插件补齐 / 刷新它们的本机资产。
+
+    资产随安装包发布：插件本身没变时既不会重新安装、也不会重新同步，升级带来的修复
+    就落不到位。这一步只覆盖"能力已经在这台机器上"的插件，不会凭空铺没人用的东西。
+    """
+    import asyncio
+
+    from core.config.local_mode import local_mode_enabled
+
+    if not local_mode_enabled():
+        return
+
+    from core.db.engine import SessionLocal
+    from core.services.plugin_device_assets import provision_present_plugins
+
+    def provision():
+        with SessionLocal() as db:
+            return provision_present_plugins(db)
+
+    ready = await asyncio.to_thread(provision)
+    if ready:
+        logger.info("[startup] 本机资产已就绪：%s", ", ".join(ready))
 
 
 async def _startup_backfill_tool_schemas():
